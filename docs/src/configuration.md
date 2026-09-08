@@ -40,6 +40,18 @@ ignore-underscore-files = false
 Cornucopia will delete and re-create the `destination` directory on every run. As a safety check, if the destination already exists, does not end with the name `cornucopia`, and does not contain a `Cargo.toml`, the CLI will prompt before continuing. Point `destination` at a directory dedicated to Cornucopia's output to avoid overwrites.
 ~~~
 
+## Wasm features
+By default, the generated crate gets a `wasm-async` feature (or `wasm-sync`, for sync generation) that enables `tokio-postgres/js` and `chrono/wasmbind`.
+
+That feature is only useful when you target the browser. Everywhere else it is dead weight: enabling it re-resolves `tokio-postgres` and `chrono`, which gives the rest of your workspace a second set of build artifacts. Set `wasm-features` to false to leave it out:
+
+```toml
+# Emit the `wasm-async`/`wasm-sync` feature on the generated crate (default: true)
+wasm-features = false
+```
+
+With the feature suppressed, the `cfg` predicates that select between the sync and async client are written in terms of `deadpool` alone, rather than `any(feature = "deadpool", feature = "wasm-async")`.
+
 ## Container management
 When using `cornucopia schema`, Cornucopia starts a temporary database container, applies your schema, and tears it down once generation is complete. These settings control how that container is managed:
 

@@ -3,6 +3,40 @@ use quote::quote;
 use super::{DependencyAnalysis, vfs::Vfs};
 use crate::config::Config;
 
+/// Re-exports of the postgres crates, at the root of the crate holding the
+/// client scaffold.
+fn db_imports(config: &Config) -> proc_macro2::TokenStream {
+    if !config.r#async {
+        return quote! {
+            pub use postgres;
+            pub use postgres::fallible_iterator;
+        };
+    }
+
+    // `wasm-async` only exists to turn on `tokio-postgres/js`, so it selects the
+    // async client just like `deadpool` does. Without it, `deadpool` alone decides.
+    let is_tokio = if config.wasm_features {
+        quote!(any(feature = "deadpool", feature = "wasm-async"))
+    } else {
+        quote!(feature = "deadpool")
+    };
+
+    quote! {
+        #[cfg(feature = "deadpool")]
+        pub use deadpool_postgres;
+
+        #[cfg(#is_tokio)]
+        pub use tokio_postgres;
+        #[cfg(#is_tokio)]
+        pub use tokio_postgres::fallible_iterator;
+
+        #[cfg(not(#is_tokio))]
+        pub use postgres;
+        #[cfg(not(#is_tokio))]
+        pub use postgres::fallible_iterator;
+    }
+}
+
 pub(crate) fn gen_lib(
     dependency_analysis: &DependencyAnalysis,
     config: &Config,
@@ -34,27 +68,7 @@ pub(crate) fn gen_lib(
         pub use type_traits::{ArraySql, BytesSql, IterSql, StringSql};
     };
 
-    let db_imports = if config.r#async {
-        quote! {
-            #[cfg(feature = "deadpool")]
-            pub use deadpool_postgres;
-
-            #[cfg(any(feature = "deadpool", feature = "wasm-async"))]
-            pub use tokio_postgres;
-            #[cfg(any(feature = "deadpool", feature = "wasm-async"))]
-            pub use tokio_postgres::fallible_iterator;
-
-            #[cfg(not(any(feature = "deadpool", feature = "wasm-async")))]
-            pub use postgres;
-            #[cfg(not(any(feature = "deadpool", feature = "wasm-async")))]
-            pub use postgres::fallible_iterator;
-        }
-    } else {
-        quote! {
-            pub use postgres;
-            pub use postgres::fallible_iterator;
-        }
-    };
+    let db_imports = db_imports(config);
 
     let json_imports = dependency_analysis
         .json
@@ -1098,5 +1112,37 @@ pub fn async_deadpool() -> proc_macro2::TokenStream {
                 PgTransaction::query_raw(self, statement, params).await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Render a token stream the way `Vfs` does, so assertions read like the
+    /// file that ends up on disk.
+    fn render(tokens: proc_macro2::TokenStream) -> String {
+        prettyplease::unparse(&syn::parse2(tokens).unwrap())
+    }
+
+    #[test]
+    fn wasm_feature_selects_the_async_client_by_default() {
+        let config = Config::builder().r#async(true).build();
+        let lib = render(gen_lib(&DependencyAnalysis::default(), &config));
+
+        assert!(lib.contains(r#"#[cfg(any(feature = "deadpool", feature = "wasm-async"))]"#));
+        assert!(lib.contains(r#"#[cfg(not(any(feature = "deadpool", feature = "wasm-async")))]"#));
+    }
+
+    #[test]
+    fn suppressed_wasm_feature_leaves_deadpool_alone() {
+        let config = Config::builder().r#async(true).wasm_features(false).build();
+        let lib = render(gen_lib(&DependencyAnalysis::default(), &config));
+
+        assert!(!lib.contains("wasm-async"));
+        assert!(lib.contains(r#"#[cfg(feature = "deadpool")]"#));
+        assert!(lib.contains(r#"#[cfg(not(feature = "deadpool"))]"#));
+        assert!(lib.contains("pub use tokio_postgres;"));
+        assert!(lib.contains("pub use postgres;"));
     }
 }

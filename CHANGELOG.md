@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `wasm-features` option to suppress the `wasm-async`/`wasm-sync` feature on the generated crate
+
 ## [1.0.1](https://github.com/cornucopia-rs/cornucopia/compare/cornucopia-v1.0.0...cornucopia-v1.0.1) - 2026-08-12
 
 ### Fixed

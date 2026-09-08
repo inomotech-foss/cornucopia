@@ -39,6 +39,9 @@ pub struct Config {
     /// Make bind functions private to force usage of params() method
     #[serde(rename = "params-only")]
     pub params_only: bool,
+    /// Emit the `wasm-async`/`wasm-sync` cargo features on the generated crate
+    #[serde(rename = "wasm-features")]
+    pub wasm_features: bool,
     /// List of static files to copy into the generated directory
     #[serde(rename = "static")]
     pub static_files: Vec<StaticFile>,
@@ -108,6 +111,7 @@ impl Default for Config {
             r#async: true,
             ignore_underscore_files: false,
             params_only: false,
+            wasm_features: true,
             types: Types {
                 mapping: HashMap::new(),
                 derive_traits: vec![],
@@ -396,6 +400,12 @@ impl ConfigBuilder {
     /// Make bind functions private to force usage of params() method
     pub fn params_only(mut self, params_only: bool) -> Self {
         self.config.params_only = params_only;
+        self
+    }
+
+    /// Emit the `wasm-async`/`wasm-sync` cargo features on the generated crate
+    pub fn wasm_features(mut self, wasm_features: bool) -> Self {
+        self.config.wasm_features = wasm_features;
         self
     }
 

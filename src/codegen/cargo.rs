@@ -199,29 +199,33 @@ pub fn gen_cargo_file(dependency_analysis: &DependencyAnalysis, config: &Config)
             ],
         );
 
-        let mut wasm_features = vec!["tokio-postgres/js".to_string()];
+        if config.wasm_features {
+            let mut wasm_features = vec!["tokio-postgres/js".to_string()];
 
-        if dependency_analysis.has_dependency() && dependency_analysis.chrono {
-            wasm_features.push("chrono/wasmbind".to_string());
+            if dependency_analysis.has_dependency() && dependency_analysis.chrono {
+                wasm_features.push("chrono/wasmbind".to_string());
+            }
+
+            manifest
+                .features
+                .insert("wasm-async".to_string(), wasm_features);
         }
-
-        manifest
-            .features
-            .insert("wasm-async".to_string(), wasm_features);
     } else {
         manifest
             .features
             .insert("default".to_string(), default_features);
 
-        let mut wasm_features = vec![];
+        if config.wasm_features {
+            let mut wasm_features = vec![];
 
-        if dependency_analysis.has_dependency() && dependency_analysis.chrono {
-            wasm_features.push("chrono/wasmbind".to_string());
+            if dependency_analysis.has_dependency() && dependency_analysis.chrono {
+                wasm_features.push("chrono/wasmbind".to_string());
+            }
+
+            manifest
+                .features
+                .insert("wasm-sync".to_string(), wasm_features);
         }
-
-        manifest
-            .features
-            .insert("wasm-sync".to_string(), wasm_features);
     }
 
     let mut deps = DependencyContext {
@@ -413,6 +417,54 @@ cornucopia = { version = "1.0.0", features = [] }
         assert!(deps.contains("chrono"));
         assert!(deps.contains("serde"));
         assert_eq!(deps.len(), 2);
+    }
+
+    fn features(manifest: &str, name: &str) -> Option<Vec<String>> {
+        let parsed: cargo_toml::Manifest = toml::from_str(manifest).unwrap();
+        parsed.features.get(name).cloned()
+    }
+
+    #[test]
+    fn wasm_feature_is_emitted_by_default() {
+        let config = Config::builder().r#async(true).build();
+        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &config);
+
+        assert_eq!(
+            features(&manifest, "wasm-async"),
+            Some(vec!["tokio-postgres/js".to_string()])
+        );
+
+        let sync = Config::builder().r#async(false).sync(true).build();
+        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &sync);
+        assert_eq!(features(&manifest, "wasm-sync"), Some(vec![]));
+    }
+
+    #[test]
+    fn wasm_feature_can_be_suppressed() {
+        let config = Config::builder().r#async(true).wasm_features(false).build();
+        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &config);
+
+        assert_eq!(features(&manifest, "wasm-async"), None);
+        // Suppressing it must not disturb the rest of the feature table
+        assert_eq!(
+            features(&manifest, "default"),
+            Some(vec!["dep:postgres".to_string(), "deadpool".to_string()])
+        );
+        assert_eq!(
+            features(&manifest, "deadpool"),
+            Some(vec![
+                "dep:deadpool-postgres".to_string(),
+                "tokio-postgres/default".to_string(),
+            ])
+        );
+
+        let sync = Config::builder()
+            .r#async(false)
+            .sync(true)
+            .wasm_features(false)
+            .build();
+        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &sync);
+        assert_eq!(features(&manifest, "wasm-sync"), None);
     }
 
     #[test]
