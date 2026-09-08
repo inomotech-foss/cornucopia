@@ -1,5 +1,5 @@
 # CLI
-The CLI exposes three main commands: `schema`, `live`, and `fresh`.
+The CLI exposes three main commands: `schema`, `live`, and `fresh`. A fourth command, `runtime`, generates the [shared runtime crate](../configuration.md#shared-runtime-crate).
 
 ```admonish note
 This is only an overview of the CLI. You should read the help message for more complete information (`cornucopia --help`)
@@ -19,6 +19,9 @@ If you want to manage the database yourself, use the `cornucopia live` command t
 ### `fresh`: Temporary database on existing server
 The `cornucopia fresh` command provides a middle-ground approach between `schema` and `live`. It connects to an existing PostgreSQL server, creates a temporary database, loads your schema files, generates your queries, and then drops the temporary database. This is useful when you have an existing PostgreSQL server but want the convenience of automatic schema loading without managing containers.
 
+## Generating the shared runtime crate
+The `cornucopia runtime` command writes the crate named by the [`shared-runtime`](../configuration.md#shared-runtime-crate) option. It contains only the client scaffold, so it needs neither your queries nor a database.
+
 ## Example Usage
 
 Here are some examples of using the different commands:
@@ -37,6 +40,9 @@ cornucopia fresh schema.sql --url postgresql://user:pass@localhost
 cornucopia fresh schema.sql --url postgresql://user:pass@localhost \
   --db-name my_temp_db \
   --search-path public,custom_schema
+
+# Generating the shared runtime crate
+cornucopia runtime --config runtime.toml
 ```
 
 ## Useful flags

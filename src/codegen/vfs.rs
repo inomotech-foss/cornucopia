@@ -62,6 +62,12 @@ impl Vfs {
         assert!(self.fs.insert(path.into(), content.into()).is_none())
     }
 
+    /// Paths of the files added so far
+    #[cfg(test)]
+    pub(crate) fn paths(&self) -> Vec<&Path> {
+        self.fs.keys().map(PathBuf::as_path).collect()
+    }
+
     pub fn persist(
         self,
         destination: impl AsRef<Path>,

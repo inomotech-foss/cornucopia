@@ -979,6 +979,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "db-runtime"
+version = "0.0.0"
+dependencies = [
+ "deadpool-postgres",
+ "postgres-protocol",
+ "postgres-types",
+ "serde",
+ "serde_json",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "db_types"
 version = "0.1.0"
 dependencies = [
@@ -2834,6 +2846,27 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "digest 0.11.3",
+]
+
+[[package]]
+name = "shared-runtime"
+version = "0.1.0"
+dependencies = [
+ "shared_runtime_codegen",
+ "tokio",
+]
+
+[[package]]
+name = "shared_runtime_codegen"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "db-runtime",
+ "deadpool-postgres",
+ "futures",
+ "postgres",
+ "postgres-types",
+ "tokio-postgres",
 ]
 
 [[package]]

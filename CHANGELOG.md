@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `wasm-features` option to suppress the `wasm-async`/`wasm-sync` feature on the generated crate
+- `shared-runtime` option and `cornucopia runtime` command, to hold the client scaffold in a crate of its own instead of emitting a copy of it into every generated crate
 
 ## [1.0.1](https://github.com/cornucopia-rs/cornucopia/compare/cornucopia-v1.0.0...cornucopia-v1.0.1) - 2026-08-12
 

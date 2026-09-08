@@ -1,0 +1,14 @@
+destination = "shared_runtime_codegen"
+
+# Take the client scaffold from `db-runtime` instead of emitting a copy of it
+shared-runtime = "db-runtime"
+wasm-features = false
+
+[manifest.package]
+name = "shared_runtime_codegen"
+version = "0.1.0"
+publish = false
+
+[manifest.dependencies]
+# Cornucopia does not know where the runtime crate lives, so declare it here
+db-runtime = { path = "../db_runtime" }

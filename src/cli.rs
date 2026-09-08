@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use rand::{RngExt, distr::Alphanumeric};
 
-use crate::{config::Config, conn, error::Error, gen_fresh, gen_live, gen_managed};
+use crate::{config::Config, conn, error::Error, gen_fresh, gen_live, gen_managed, gen_runtime};
 
 /// Command line interface to interact with Cornucopia SQL.
 #[derive(Parser, Debug)]
@@ -75,16 +75,45 @@ enum Action {
         #[clap(flatten)]
         args: CommonArgs,
     },
+    /// Generate the shared runtime crate that `shared-runtime` points at
+    Runtime {
+        /// Config file path
+        #[clap(short, long, default_value = "cornucopia.toml")]
+        config: PathBuf,
+
+        /// Destination folder for the generated runtime crate
+        #[clap(short, long)]
+        destination: Option<PathBuf>,
+
+        /// Generate synchronous rust code
+        #[clap(long)]
+        sync: Option<bool>,
+
+        /// Generate asynchronous rust code
+        #[clap(long)]
+        r#async: Option<bool>,
+    },
 }
 
 impl Action {
     fn args(&self) -> CommonArgs {
         match self {
-            Self::Live { args, .. } => args,
-            Self::Schema { args, .. } => args,
-            Self::Fresh { args, .. } => args,
+            Self::Live { args, .. } | Self::Schema { args, .. } | Self::Fresh { args, .. } => {
+                args.clone()
+            }
+            Self::Runtime {
+                config,
+                destination,
+                sync,
+                r#async,
+            } => CommonArgs {
+                config: config.clone(),
+                queries_path: None,
+                destination: destination.clone(),
+                sync: *sync,
+                r#async: *r#async,
+            },
         }
-        .clone()
     }
 }
 
@@ -204,6 +233,9 @@ pub fn run() -> Result<(), Error> {
                 keep_db,
                 cfg,
             )?;
+        }
+        Action::Runtime { .. } => {
+            gen_runtime(cfg)?;
         }
     };
     Ok(())

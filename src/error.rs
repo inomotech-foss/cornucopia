@@ -51,6 +51,15 @@ pub(crate) enum Warning {
         )
     )]
     DeprecatedTypeAttributesMapping,
+    /// User set `shared-runtime` without declaring the crate as a dependency.
+    #[error("`shared-runtime` crate `{0}` is not a declared dependency")]
+    #[diagnostic(
+        severity(Warning),
+        help(
+            "The generated crate references the shared runtime crate, so it must be able to resolve it. Add it under `[manifest.dependencies]` or to your workspace dependencies. See https://cornucopia-rs.github.io/cornucopia/configuration.html#shared-runtime-crate for more."
+        )
+    )]
+    UndeclaredSharedRuntime(String),
 }
 
 impl Warning {

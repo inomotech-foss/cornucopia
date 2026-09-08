@@ -1,0 +1,9 @@
+# Config for the shared runtime crate. It holds the client scaffold, so it
+# needs no queries and no database.
+#
+# `shared-runtime` names the crate, so there is no `[manifest.package] name`
+# here. That also means `cornucopia.toml` could be used directly, with the
+# destination overridden on the command line.
+destination = "db_runtime"
+shared-runtime = "db-runtime"
+wasm-features = false

@@ -52,6 +52,9 @@ pub(crate) struct CodegenTest {
     #[serde(default = "default_queries_path")]
     pub(crate) queries_path: PathBuf,
     pub(crate) destination: PathBuf,
+    /// Config file of the shared runtime crate, for tests that use one
+    #[serde(default, rename = "runtime-config")]
+    pub(crate) runtime_config: Option<PathBuf>,
     #[serde(default)]
     pub(crate) sync: bool,
     #[serde(default)]

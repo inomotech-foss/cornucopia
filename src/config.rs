@@ -39,6 +39,10 @@ pub struct Config {
     /// Make bind functions private to force usage of params() method
     #[serde(rename = "params-only")]
     pub params_only: bool,
+    /// Name of a crate providing the client scaffold. When set, the generated
+    /// crate depends on it instead of emitting its own copy of the scaffold.
+    #[serde(rename = "shared-runtime")]
+    pub shared_runtime: Option<String>,
     /// Emit the `wasm-async`/`wasm-sync` cargo features on the generated crate
     #[serde(rename = "wasm-features")]
     pub wasm_features: bool,
@@ -92,6 +96,24 @@ impl Config {
         ConfigBuilder::default()
     }
 
+    /// The configuration of the shared runtime crate this config points at.
+    ///
+    /// Generated crates depend on the runtime crate by the name given in
+    /// `shared-runtime`, so that name is what the crate has to be called,
+    /// rather than `manifest.package.name`. That also lets a single config
+    /// file describe both crates. The runtime crate holds the scaffold, so it
+    /// cannot defer to one itself.
+    pub(crate) fn as_runtime(&self) -> Self {
+        let mut config = self.clone();
+
+        if let Some(name) = config.shared_runtime.take() {
+            let package = config.manifest.package.get_or_insert_with(default_package);
+            package.name = name;
+        }
+
+        config
+    }
+
     pub(crate) fn get_type_mapping(&self, ty: &Type) -> Option<&TypeMapping> {
         let key = format!("{}.{}", ty.schema(), ty.name());
         self.types.mapping.get(&key)
@@ -111,6 +133,7 @@ impl Default for Config {
             r#async: true,
             ignore_underscore_files: false,
             params_only: false,
+            shared_runtime: None,
             wasm_features: true,
             types: Types {
                 mapping: HashMap::new(),
@@ -403,6 +426,12 @@ impl ConfigBuilder {
         self
     }
 
+    /// Depend on a shared runtime crate instead of emitting the client scaffold
+    pub fn shared_runtime(mut self, shared_runtime: impl Into<String>) -> Self {
+        self.config.shared_runtime = Some(shared_runtime.into());
+        self
+    }
+
     /// Emit the `wasm-async`/`wasm-sync` cargo features on the generated crate
     pub fn wasm_features(mut self, wasm_features: bool) -> Self {
         self.config.wasm_features = wasm_features;
@@ -542,6 +571,47 @@ version = "0.2"
             package.publish,
             cargo_toml::Inheritable::Set(cargo_toml::Publish::Flag(false))
         );
+    }
+
+    #[test]
+    fn runtime_config_takes_its_name_from_the_shared_runtime_option() {
+        let toml_content = r#"
+shared-runtime = "db-runtime"
+
+[manifest.package]
+name = "queries"
+version = "2.0.0"
+"#;
+
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(toml_content.as_bytes()).unwrap();
+
+        let runtime = Config::from_file(tmpfile.path()).unwrap().as_runtime();
+
+        let package = runtime
+            .manifest
+            .package
+            .expect("package section should exist");
+        assert_eq!(
+            package.name, "db-runtime",
+            "generated crates depend on the runtime by that name"
+        );
+        assert_eq!(package.version().to_string(), "2.0.0");
+        assert!(
+            runtime.shared_runtime.is_none(),
+            "the runtime crate holds the scaffold, it cannot defer to one"
+        );
+    }
+
+    #[test]
+    fn runtime_config_keeps_the_package_name_without_shared_runtime() {
+        let config = Config::builder().name("db-runtime").build().as_runtime();
+
+        let package = config
+            .manifest
+            .package
+            .expect("package section should exist");
+        assert_eq!(package.name, "db-runtime");
     }
 
     #[test]

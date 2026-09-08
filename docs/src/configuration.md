@@ -40,6 +40,51 @@ ignore-underscore-files = false
 Cornucopia will delete and re-create the `destination` directory on every run. As a safety check, if the destination already exists, does not end with the name `cornucopia`, and does not contain a `Cargo.toml`, the CLI will prompt before continuing. Point `destination` at a directory dedicated to Cornucopia's output to avoid overwrites.
 ~~~
 
+## Shared runtime crate
+Every generated crate normally carries its own copy of the client scaffold: the `GenericClient` abstraction, the `ArraySql`/`StringSql` traits, the domain wrappers and the array iterator. That is roughly 650 lines that are the same in each of them. A project that generates a single crate does not notice. A project that generates one crate per schema module ends up with the same code many times over.
+
+The `shared-runtime` option names a crate that provides the scaffold instead:
+
+```toml
+shared-runtime = "db-runtime"
+
+[manifest.dependencies]
+# Cornucopia does not know where the runtime crate lives, so declare it yourself
+db-runtime = { path = "../db_runtime" }
+```
+
+The generated crate then contains only `types` and `queries`, and re-exports the scaffold from the runtime crate. Its public API does not change: `crate::client::async_`, `crate::ArraySql`, `crate::Domain` and the rest all still resolve, so code using the generated crate does not need to know whether the option is set.
+
+Cornucopia cannot invent a version or a path for the runtime crate, so it must be declared under `[manifest.dependencies]`, or in the workspace manifest when [`use-workspace-deps`](#workspace-dependencies) is set. Cornucopia warns if it finds neither.
+
+### Generating the runtime crate
+The runtime crate is produced by `cornucopia runtime`. It holds no queries and no types, so it needs no database, and it only has to be generated again when you upgrade Cornucopia.
+
+The crate is named after `shared-runtime`, not after `manifest.package.name`, because that name is what the generated crates depend on. This means the same config file can produce both crates, with only the destination differing:
+
+```bash
+cornucopia runtime --config cornucopia.toml --destination ../db_runtime
+```
+
+Give the runtime crate a config file of its own when you want to configure the two crates separately:
+
+```toml
+# runtime.toml
+destination = "db_runtime"
+shared-runtime = "db-runtime"
+wasm-features = false
+```
+
+The rest of `[manifest.package]` still applies to the runtime crate, only its `name` is decided by `shared-runtime`. When `shared-runtime` is unset, `manifest.package.name` is used as usual.
+
+The `sync` and `async` options apply as usual, and must cover every flavour the crates depending on it use. A runtime crate that is async only does not depend on `postgres` at all, since `tokio-postgres` covers everything the async scaffold needs.
+
+~~~admonish note
+The runtime crate always defines the `JsonSql` trait, and therefore always depends on `serde_json`. A generated crate only emits that trait when one of its queries uses a JSON column, but the runtime crate is generated once without knowing which queries will use it. The trait is only re-exported as `crate::JsonSql` by the generated crates that need it, so the narrowing is still visible in their public API.
+~~~
+
+See the [shared runtime](https://github.com/cornucopia-rs/cornucopia/tree/main/examples/shared_runtime) example for a full setup.
+
 ## Wasm features
 By default, the generated crate gets a `wasm-async` feature (or `wasm-sync`, for sync generation) that enables `tokio-postgres/js` and `chrono/wasmbind`.
 

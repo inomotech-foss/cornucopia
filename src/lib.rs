@@ -63,6 +63,18 @@ pub fn gen_live(client: &Client, config: Config) -> Result<(), Error> {
     Ok(())
 }
 
+/// Generates the shared runtime crate that the `shared-runtime` configuration
+/// option points at. This crate holds the client scaffold that generated crates
+/// would otherwise each emit for themselves. It depends on neither your schema
+/// nor your queries, so no database is needed to generate it.
+pub fn gen_runtime(config: Config) -> Result<(), Error> {
+    let generated = codegen::generate_runtime(&config);
+
+    generated.persist(config.destination, config.static_files)?;
+
+    Ok(())
+}
+
 /// Generates Rust queries from PostgreSQL queries located at `queries_path`, using
 /// a container managed by cornucopia. The database schema is created using `schema_files`.
 /// Code generation settings are set using the `config` parameter.

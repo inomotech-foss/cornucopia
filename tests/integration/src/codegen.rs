@@ -33,6 +33,26 @@ pub(crate) fn run_codegen_test(
             // Load schema
             cornucopia::load_schema(client, &["schema.sql"])?;
 
+            // The shared runtime crate holds the client scaffold the generated
+            // crate defers to, so it has to exist before the generated crate
+            // is compiled.
+            if let Some(runtime_config) = &test.runtime_config {
+                let mut cfg = Config::from_file(runtime_config)?;
+
+                if !apply {
+                    let tmp_path = tmp_dir.path().join(
+                        cfg.destination
+                            .file_name()
+                            .unwrap_or("runtime".as_ref())
+                            .to_owned(),
+                    );
+                    std::fs::create_dir_all(&tmp_path)?;
+                    cfg.destination = tmp_path;
+                }
+
+                cornucopia::gen_runtime(cfg).map_err(Error::report)?;
+            }
+
             // If `--apply`, then the code will be regenerated.
             // Otherwise, it is only checked.
             if apply {

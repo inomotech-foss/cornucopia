@@ -1,0 +1,11 @@
+[package]
+edition = "2024"
+name = "shared-runtime"
+version = "0.1.0"
+publish = false
+
+[dependencies]
+# Cornucopia
+cornucopia = { path = "shared_runtime_codegen", package = "shared_runtime_codegen" }
+# Async
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }

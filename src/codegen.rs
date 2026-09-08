@@ -1,6 +1,6 @@
 use core::str;
 
-use self::{types::gen_type_modules, vfs::Vfs};
+use self::{cargo::CrateKind, types::gen_type_modules, vfs::Vfs};
 use crate::{
     config::Config,
     prepare_queries::{Preparation, PreparedField},
@@ -132,7 +132,7 @@ pub fn idx_char(idx: usize) -> String {
 
 pub(crate) fn generate(preparation: Preparation, config: &Config) -> Vfs {
     let mut vfs = Vfs::empty();
-    let cargo = cargo::gen_cargo_file(&preparation.dependency_analysis, config);
+    let cargo = cargo::gen_cargo_file(&preparation.dependency_analysis, config, CrateKind::Queries);
     vfs.add_string("Cargo.toml", cargo);
     vfs.add(
         "src/lib.rs",
@@ -142,5 +142,16 @@ pub(crate) fn generate(preparation: Preparation, config: &Config) -> Vfs {
     vfs.add("src/types.rs", types);
     queries::gen_queries(&mut vfs, &preparation, config);
     client::gen_clients(&mut vfs, &preparation.dependency_analysis, config);
+    vfs
+}
+
+pub(crate) fn generate_runtime(config: &Config) -> Vfs {
+    let config = &config.as_runtime();
+    let dependency_analysis = DependencyAnalysis::runtime();
+    let mut vfs = Vfs::empty();
+    let cargo = cargo::gen_cargo_file(&dependency_analysis, config, CrateKind::Runtime);
+    vfs.add_string("Cargo.toml", cargo);
+    vfs.add("src/lib.rs", client::gen_runtime_lib(config));
+    client::gen_runtime_clients(&mut vfs, config);
     vfs
 }

@@ -3,6 +3,14 @@ use quote::quote;
 use super::{DependencyAnalysis, vfs::Vfs};
 use crate::config::Config;
 
+/// The `shared-runtime` crate as a Rust path, when one is configured.
+pub(crate) fn shared_runtime_path(config: &Config) -> Option<syn::Path> {
+    config.shared_runtime.as_deref().map(|name| {
+        syn::parse_str(&name.replace('-', "_"))
+            .expect("`shared-runtime` should be a valid crate name")
+    })
+}
+
 /// Re-exports of the postgres crates, at the root of the crate holding the
 /// client scaffold.
 fn db_imports(config: &Config) -> proc_macro2::TokenStream {
@@ -37,11 +45,33 @@ fn db_imports(config: &Config) -> proc_macro2::TokenStream {
     }
 }
 
+/// Re-exports of the postgres crates, at the root of the shared runtime crate.
+///
+/// A runtime crate holds the whole scaffold and nothing else, so it knows what
+/// that scaffold needs. When it is async only, `tokio-postgres` is one of its
+/// hard dependencies and already provides the `fallible_iterator` re-export the
+/// scaffold reaches for, so `postgres` is never named and is not declared. A
+/// generated crate cannot make that call, because its query code names
+/// `postgres` directly whenever sync queries are emitted.
+fn runtime_db_imports(config: &Config) -> proc_macro2::TokenStream {
+    if !config.r#async || config.sync {
+        return db_imports(config);
+    }
+
+    quote! {
+        #[cfg(feature = "deadpool")]
+        pub use deadpool_postgres;
+
+        pub use tokio_postgres;
+        pub use tokio_postgres::fallible_iterator;
+    }
+}
+
 pub(crate) fn gen_lib(
     dependency_analysis: &DependencyAnalysis,
     config: &Config,
 ) -> proc_macro2::TokenStream {
-    let base_tokens = quote! {
+    let query_modules = quote! {
         #[allow(clippy::all, clippy::pedantic)]
         #[allow(unused_variables)]
         #[allow(unused_imports)]
@@ -53,7 +83,66 @@ pub(crate) fn gen_lib(
         #[allow(unused_imports)]
         #[allow(dead_code)]
         pub mod queries;
+    };
 
+    let runtime = shared_runtime_path(config);
+
+    let scaffold = match &runtime {
+        // The scaffold lives in another crate, but the generated code and its
+        // users still reach it through `crate::`, so re-export it as-is.
+        Some(runtime) => quote! {
+            pub use #runtime::client;
+
+            pub(crate) use #runtime::slice_iter;
+
+            pub use #runtime::ArrayIterator;
+            pub use #runtime::{Domain, DomainArray};
+            pub use #runtime::{ArraySql, BytesSql, IterSql, StringSql};
+        },
+        None => quote! {
+            pub mod client;
+
+            mod array_iterator;
+            mod domain;
+            mod type_traits;
+            mod utils;
+
+            pub(crate) use utils::slice_iter;
+
+            pub use array_iterator::ArrayIterator;
+            pub use domain::{Domain, DomainArray};
+            pub use type_traits::{ArraySql, BytesSql, IterSql, StringSql};
+        },
+    };
+
+    let db_imports = db_imports(config);
+
+    let json_imports = if dependency_analysis.json {
+        match &runtime {
+            Some(runtime) => quote! {
+                pub use #runtime::JsonSql;
+            },
+            None => quote! {
+                pub use type_traits::JsonSql;
+            },
+        }
+    } else {
+        quote!()
+    };
+
+    quote! {
+        #query_modules
+        #scaffold
+        #db_imports
+        #json_imports
+    }
+}
+
+/// Root of the shared runtime crate. It holds nothing but the scaffold, so it
+/// has no `types` or `queries` module, and it exposes `slice_iter` publicly
+/// because the crates depending on it re-export it as their own.
+pub(crate) fn gen_runtime_lib(config: &Config) -> proc_macro2::TokenStream {
+    let base_tokens = quote! {
         pub mod client;
 
         mod array_iterator;
@@ -61,26 +150,18 @@ pub(crate) fn gen_lib(
         mod type_traits;
         mod utils;
 
-        pub(crate) use utils::slice_iter;
+        pub use utils::slice_iter;
 
         pub use array_iterator::ArrayIterator;
         pub use domain::{Domain, DomainArray};
-        pub use type_traits::{ArraySql, BytesSql, IterSql, StringSql};
+        pub use type_traits::{ArraySql, BytesSql, IterSql, JsonSql, StringSql};
     };
 
-    let db_imports = db_imports(config);
-
-    let json_imports = dependency_analysis
-        .json
-        .then_some(quote! {
-            pub use type_traits::JsonSql;
-        })
-        .unwrap_or_else(|| quote!());
+    let db_imports = runtime_db_imports(config);
 
     quote! {
         #base_tokens
         #db_imports
-        #json_imports
     }
 }
 
@@ -89,6 +170,11 @@ pub(crate) fn gen_clients(
     dependency_analysis: &DependencyAnalysis,
     config: &Config,
 ) {
+    // The scaffold is provided by the shared runtime crate instead
+    if config.shared_runtime.is_some() {
+        return;
+    }
+
     // Generate common files
     vfs.add("src/utils.rs", core_utils());
     vfs.add("src/domain.rs", core_domain());
@@ -109,6 +195,28 @@ pub(crate) fn gen_clients(
     vfs.add("src/client.rs", client(config))
 }
 
+pub(crate) fn gen_runtime_clients(vfs: &mut Vfs, config: &Config) {
+    let dependency_analysis = DependencyAnalysis::runtime();
+
+    vfs.add("src/utils.rs", core_utils());
+    vfs.add("src/domain.rs", core_domain());
+    vfs.add("src/array_iterator.rs", core_array());
+    vfs.add("src/type_traits.rs", core_type_traits(&dependency_analysis));
+    if config.sync {
+        vfs.add("src/client/sync.rs", sync());
+        vfs.add("src/client/sync/generic_client.rs", sync_generic_client());
+    }
+    if config.r#async {
+        vfs.add("src/client/async_.rs", async_());
+        vfs.add(
+            "src/client/async_/generic_client.rs",
+            async_generic_client(),
+        );
+        vfs.add("src/client/async_/deadpool.rs", async_deadpool());
+    }
+    vfs.add("src/client.rs", runtime_client(config))
+}
+
 pub fn client(config: &Config) -> proc_macro2::TokenStream {
     match (config.r#async, config.sync) {
         (true, false) => quote! {
@@ -117,6 +225,26 @@ pub fn client(config: &Config) -> proc_macro2::TokenStream {
         },
         (false, true) => quote! {
             pub(crate) mod sync;
+            pub use sync::*;
+        },
+        _ => quote! {
+            pub mod sync;
+            pub mod async_;
+        },
+    }
+}
+
+/// Unlike a generated crate, the runtime crate always exposes both client
+/// modules publicly: the crates depending on it name `client::sync` and
+/// `client::async_` in their query code.
+pub fn runtime_client(config: &Config) -> proc_macro2::TokenStream {
+    match (config.r#async, config.sync) {
+        (true, false) => quote! {
+            pub mod async_;
+            pub use async_::*;
+        },
+        (false, true) => quote! {
+            pub mod sync;
             pub use sync::*;
         },
         _ => quote! {
@@ -1117,12 +1245,167 @@ pub fn async_deadpool() -> proc_macro2::TokenStream {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     /// Render a token stream the way `Vfs` does, so assertions read like the
     /// file that ends up on disk.
     fn render(tokens: proc_macro2::TokenStream) -> String {
         prettyplease::unparse(&syn::parse2(tokens).unwrap())
+    }
+
+    fn shared_config() -> Config {
+        Config::builder()
+            .r#async(true)
+            .sync(true)
+            .shared_runtime("db-runtime")
+            .build()
+    }
+
+    #[test]
+    fn inline_scaffold_is_the_default() {
+        let config = Config::builder().r#async(true).sync(true).build();
+        let mut vfs = Vfs::empty();
+        gen_clients(&mut vfs, &DependencyAnalysis::default(), &config);
+
+        assert_eq!(
+            vfs.paths(),
+            [
+                Path::new("src/array_iterator.rs"),
+                Path::new("src/client/async_/deadpool.rs"),
+                Path::new("src/client/async_/generic_client.rs"),
+                Path::new("src/client/async_.rs"),
+                Path::new("src/client/sync/generic_client.rs"),
+                Path::new("src/client/sync.rs"),
+                Path::new("src/client.rs"),
+                Path::new("src/domain.rs"),
+                Path::new("src/type_traits.rs"),
+                Path::new("src/utils.rs"),
+            ]
+        );
+
+        let lib = render(gen_lib(&DependencyAnalysis::default(), &config));
+        assert!(lib.contains("mod type_traits;"));
+        assert!(lib.contains("pub use type_traits::{ArraySql, BytesSql, IterSql, StringSql};"));
+    }
+
+    #[test]
+    fn shared_runtime_emits_no_scaffold() {
+        let mut vfs = Vfs::empty();
+        gen_clients(&mut vfs, &DependencyAnalysis::default(), &shared_config());
+
+        assert!(
+            vfs.paths().is_empty(),
+            "the shared runtime crate provides the scaffold"
+        );
+    }
+
+    #[test]
+    fn shared_runtime_is_re_exported_under_the_same_paths() {
+        let lib = render(gen_lib(&DependencyAnalysis::default(), &shared_config()));
+
+        // The crate name is hyphenated, the Rust path is not
+        assert!(lib.contains("pub use db_runtime::client;"));
+        assert!(lib.contains("pub(crate) use db_runtime::slice_iter;"));
+        assert!(lib.contains("pub use db_runtime::ArrayIterator;"));
+        assert!(lib.contains("pub use db_runtime::{Domain, DomainArray};"));
+        assert!(lib.contains("pub use db_runtime::{ArraySql, BytesSql, IterSql, StringSql};"));
+
+        assert!(!lib.contains("mod type_traits;"));
+        assert!(!lib.contains("mod domain;"));
+        assert!(!lib.contains("mod array_iterator;"));
+        assert!(!lib.contains("mod utils;"));
+    }
+
+    #[test]
+    fn json_trait_stays_narrowed_per_crate() {
+        let json = DependencyAnalysis {
+            json: true,
+            ..DependencyAnalysis::default()
+        };
+
+        let without = render(gen_lib(&DependencyAnalysis::default(), &shared_config()));
+        assert!(!without.contains("JsonSql"));
+
+        let with = render(gen_lib(&json, &shared_config()));
+        assert!(with.contains("pub use db_runtime::JsonSql;"));
+    }
+
+    #[test]
+    fn runtime_crate_holds_the_scaffold_and_the_superset_of_traits() {
+        let config = Config::builder().r#async(true).sync(true).build();
+        let mut vfs = Vfs::empty();
+        gen_runtime_clients(&mut vfs, &config);
+
+        assert_eq!(
+            vfs.paths(),
+            [
+                Path::new("src/array_iterator.rs"),
+                Path::new("src/client/async_/deadpool.rs"),
+                Path::new("src/client/async_/generic_client.rs"),
+                Path::new("src/client/async_.rs"),
+                Path::new("src/client/sync/generic_client.rs"),
+                Path::new("src/client/sync.rs"),
+                Path::new("src/client.rs"),
+                Path::new("src/domain.rs"),
+                Path::new("src/type_traits.rs"),
+                Path::new("src/utils.rs"),
+            ]
+        );
+
+        // `JsonSql` is unconditional here, the runtime is generated without
+        // knowing which queries will use it
+        let type_traits = render(core_type_traits(&DependencyAnalysis::runtime()));
+        assert!(type_traits.contains("pub trait JsonSql"));
+
+        let lib = render(gen_runtime_lib(&config));
+        assert!(
+            lib.contains("pub use type_traits::{ArraySql, BytesSql, IterSql, JsonSql, StringSql};")
+        );
+        // Depending crates re-export it as their own `crate::slice_iter`
+        assert!(lib.contains("pub use utils::slice_iter;"));
+        assert!(!lib.contains("pub mod queries;"));
+        assert!(!lib.contains("pub mod types;"));
+    }
+
+    #[test]
+    fn async_only_runtime_never_names_postgres() {
+        let config = Config::builder().r#async(true).sync(false).build();
+        let lib = render(gen_runtime_lib(&config));
+
+        // `tokio-postgres` is a hard dependency of the async scaffold and
+        // carries the `fallible_iterator` re-export it needs
+        assert!(lib.contains("pub use tokio_postgres;"));
+        assert!(lib.contains("pub use tokio_postgres::fallible_iterator;"));
+        assert!(!lib.contains("pub use postgres"));
+        assert!(!lib.contains("#[cfg(not("));
+    }
+
+    #[test]
+    fn runtime_with_sync_still_re_exports_postgres() {
+        let both = render(gen_runtime_lib(
+            &Config::builder().r#async(true).sync(true).build(),
+        ));
+        assert!(both.contains("pub use postgres;"));
+
+        let sync_only = render(gen_runtime_lib(
+            &Config::builder().r#async(false).sync(true).build(),
+        ));
+        assert!(sync_only.contains("pub use postgres;"));
+    }
+
+    #[test]
+    fn runtime_crate_exposes_both_client_modules() {
+        // A generated crate keeps the single flavour module private, but query
+        // code in another crate has to be able to name it
+        let async_only = render(runtime_client(&Config::builder().r#async(true).build()));
+        assert!(async_only.contains("pub mod async_;"));
+
+        let sync_only = render(runtime_client(
+            &Config::builder().r#async(false).sync(true).build(),
+        ));
+        assert!(sync_only.contains("pub mod sync;"));
     }
 
     #[test]

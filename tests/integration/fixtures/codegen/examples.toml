@@ -32,3 +32,12 @@ base_path = "examples/custom_types"
 destination = "db/custom_types_codegen"
 run = true
 config = true
+
+[[test]]
+name = "Shared runtime"
+base_path = "examples/shared_runtime"
+destination = "shared_runtime_codegen"
+runtime-config = "runtime.toml"
+async = true
+run = true
+config = true

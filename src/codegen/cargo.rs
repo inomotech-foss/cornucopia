@@ -3,7 +3,10 @@ use std::{collections::HashSet, fs, path::Path};
 use cargo_toml::{Dependency, DependencyDetail, InheritedDependencyDetail};
 use postgres_types::{Kind, Type};
 
-use crate::config::{Config, UseWorkspaceDeps};
+use crate::{
+    config::{Config, UseWorkspaceDeps},
+    error::Warning,
+};
 
 mod versions {
     // https://crates.io/crates/postgres-types
@@ -32,6 +35,15 @@ mod versions {
     pub const DEADPOOL_POSTGRES: &str = "0.14.1";
 }
 
+/// Which of the two kinds of crate a manifest is generated for
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CrateKind {
+    /// A crate holding generated queries and types
+    Queries,
+    /// The shared runtime crate, holding only the client scaffold
+    Runtime,
+}
+
 /// Register use of typed requiring specific dependencies
 #[derive(Debug, Clone, Default)]
 pub struct DependencyAnalysis {
@@ -43,6 +55,17 @@ pub struct DependencyAnalysis {
 }
 
 impl DependencyAnalysis {
+    /// Dependencies of the shared runtime crate. The scaffold itself uses no
+    /// type specific crate, except that `JsonSql` needs `serde_json`. The
+    /// runtime is generated once, without knowing which queries will use it,
+    /// so it always emits `JsonSql` and always pays for that dependency.
+    pub fn runtime() -> Self {
+        Self {
+            json: true,
+            ..Self::default()
+        }
+    }
+
     pub fn analyse(&mut self, ty: &Type) {
         match ty.kind() {
             Kind::Simple => match *ty {
@@ -148,6 +171,28 @@ impl DependencyContext<'_> {
                 .insert(name.to_string(), self.to_cargo_dep(dep, use_workspace));
         }
     }
+
+    /// Cornucopia does not publish the shared runtime crate, so it has no
+    /// version or path to fill in. The user declares it, either in
+    /// `[manifest.dependencies]` or in the workspace being generated into.
+    fn add_shared_runtime(&mut self, name: &str) {
+        if self.manifest.dependencies.contains_key(name) {
+            return;
+        }
+
+        if self.use_workspace && self.workspace_deps.contains(name) {
+            self.manifest.dependencies.insert(
+                name.to_string(),
+                Dependency::Inherited(InheritedDependencyDetail {
+                    workspace: true,
+                    ..Default::default()
+                }),
+            );
+            return;
+        }
+
+        Warning::UndeclaredSharedRuntime(name.to_string()).emit();
+    }
 }
 
 fn get_workspace_deps(manifest_path: &Path) -> HashSet<String> {
@@ -169,10 +214,20 @@ fn get_workspace_deps(manifest_path: &Path) -> HashSet<String> {
     deps
 }
 
-pub fn gen_cargo_file(dependency_analysis: &DependencyAnalysis, config: &Config) -> String {
+pub fn gen_cargo_file(
+    dependency_analysis: &DependencyAnalysis,
+    config: &Config,
+    kind: CrateKind,
+) -> String {
     let mut manifest = config.manifest.clone();
 
-    let mut default_features = if manifest.dependencies.contains_key("postgres") {
+    // An async only runtime crate never names `postgres`: `tokio-postgres`
+    // covers everything the scaffold uses. A crate holding queries always
+    // declares it, because its sync query code names it directly.
+    let needs_postgres = kind == CrateKind::Queries || config.sync;
+
+    let mut default_features = if !needs_postgres || manifest.dependencies.contains_key("postgres")
+    {
         vec![]
     } else {
         vec!["dep:postgres".to_string()]
@@ -191,13 +246,20 @@ pub fn gen_cargo_file(dependency_analysis: &DependencyAnalysis, config: &Config)
             .features
             .insert("default".to_string(), default_features);
 
-        manifest.features.insert(
-            "deadpool".to_string(),
-            vec![
-                "dep:deadpool-postgres".to_string(),
-                "tokio-postgres/default".to_string(),
-            ],
-        );
+        let mut deadpool_features = vec![
+            "dep:deadpool-postgres".to_string(),
+            "tokio-postgres/default".to_string(),
+        ];
+
+        // The shared runtime crate gates its deadpool `GenericClient` impls
+        // behind its own feature, so this crate has to forward ours.
+        if let Some(runtime) = &config.shared_runtime {
+            deadpool_features.push(format!("{runtime}/deadpool"));
+        }
+
+        manifest
+            .features
+            .insert("deadpool".to_string(), deadpool_features);
 
         if config.wasm_features {
             let mut wasm_features = vec!["tokio-postgres/js".to_string()];
@@ -242,10 +304,15 @@ pub fn gen_cargo_file(dependency_analysis: &DependencyAnalysis, config: &Config)
             .into_detail(),
     );
 
-    deps.add(
-        "postgres-protocol",
-        &DependencyBuilder::new(versions::POSTGRES_PROTOCOL).into_detail(),
-    );
+    if let Some(runtime) = &config.shared_runtime {
+        deps.add_shared_runtime(runtime);
+    } else {
+        // Only the client scaffold uses `postgres-protocol`
+        deps.add(
+            "postgres-protocol",
+            &DependencyBuilder::new(versions::POSTGRES_PROTOCOL).into_detail(),
+        );
+    }
 
     let mut client_features = Vec::new();
 
@@ -343,13 +410,15 @@ pub fn gen_cargo_file(dependency_analysis: &DependencyAnalysis, config: &Config)
     }
 
     // Postgres client
-    deps.add(
-        "postgres",
-        &DependencyBuilder::new(versions::POSTGRES)
-            .features(client_features.clone())
-            .optional()
-            .into_detail(),
-    );
+    if needs_postgres {
+        deps.add(
+            "postgres",
+            &DependencyBuilder::new(versions::POSTGRES)
+                .features(client_features.clone())
+                .optional()
+                .into_detail(),
+        );
+    }
 
     // Async dependencies
     if config.r#async {
@@ -361,10 +430,13 @@ pub fn gen_cargo_file(dependency_analysis: &DependencyAnalysis, config: &Config)
                 .into_detail(),
         );
 
-        deps.add(
-            "futures",
-            &DependencyBuilder::new(versions::FUTURES).into_detail(),
-        );
+        // Only the generated queries use `futures`
+        if kind == CrateKind::Queries {
+            deps.add(
+                "futures",
+                &DependencyBuilder::new(versions::FUTURES).into_detail(),
+            );
+        }
 
         deps.add(
             "deadpool-postgres",
@@ -427,28 +499,11 @@ cornucopia = { version = "1.0.0", features = [] }
     #[test]
     fn wasm_feature_is_emitted_by_default() {
         let config = Config::builder().r#async(true).build();
-        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &config);
+        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &config, CrateKind::Queries);
 
         assert_eq!(
             features(&manifest, "wasm-async"),
             Some(vec!["tokio-postgres/js".to_string()])
-        );
-
-        let sync = Config::builder().r#async(false).sync(true).build();
-        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &sync);
-        assert_eq!(features(&manifest, "wasm-sync"), Some(vec![]));
-    }
-
-    #[test]
-    fn wasm_feature_can_be_suppressed() {
-        let config = Config::builder().r#async(true).wasm_features(false).build();
-        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &config);
-
-        assert_eq!(features(&manifest, "wasm-async"), None);
-        // Suppressing it must not disturb the rest of the feature table
-        assert_eq!(
-            features(&manifest, "default"),
-            Some(vec!["dep:postgres".to_string(), "deadpool".to_string()])
         );
         assert_eq!(
             features(&manifest, "deadpool"),
@@ -458,13 +513,91 @@ cornucopia = { version = "1.0.0", features = [] }
             ])
         );
 
+        let sync = Config::builder().r#async(false).sync(true).build();
+        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &sync, CrateKind::Queries);
+        assert_eq!(features(&manifest, "wasm-sync"), Some(vec![]));
+    }
+
+    #[test]
+    fn wasm_feature_can_be_suppressed() {
+        let config = Config::builder().r#async(true).wasm_features(false).build();
+        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &config, CrateKind::Queries);
+
+        assert_eq!(features(&manifest, "wasm-async"), None);
+        // Suppressing it must not disturb the rest of the feature table
+        assert_eq!(
+            features(&manifest, "default"),
+            Some(vec!["dep:postgres".to_string(), "deadpool".to_string()])
+        );
+
         let sync = Config::builder()
             .r#async(false)
             .sync(true)
             .wasm_features(false)
             .build();
-        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &sync);
+        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &sync, CrateKind::Queries);
         assert_eq!(features(&manifest, "wasm-sync"), None);
+    }
+
+    #[test]
+    fn shared_runtime_forwards_deadpool_and_drops_the_scaffold_dependency() {
+        let config = Config::builder()
+            .r#async(true)
+            .shared_runtime("db-runtime")
+            .add_dependency("db-runtime", Dependency::Simple("0.1".parse().unwrap()))
+            .build();
+        let manifest = gen_cargo_file(&DependencyAnalysis::default(), &config, CrateKind::Queries);
+
+        // The runtime gates its deadpool impls behind its own feature
+        assert_eq!(
+            features(&manifest, "deadpool"),
+            Some(vec![
+                "dep:deadpool-postgres".to_string(),
+                "tokio-postgres/default".to_string(),
+                "db-runtime/deadpool".to_string(),
+            ])
+        );
+
+        let parsed: cargo_toml::Manifest = toml::from_str(&manifest).unwrap();
+        assert!(parsed.dependencies.contains_key("db-runtime"));
+        // Only the scaffold uses `postgres-protocol`
+        assert!(!parsed.dependencies.contains_key("postgres-protocol"));
+        assert!(parsed.dependencies.contains_key("postgres-types"));
+    }
+
+    #[test]
+    fn runtime_crate_needs_the_scaffold_dependencies_only() {
+        let config = Config::builder().r#async(true).sync(true).build();
+        let manifest = gen_cargo_file(&DependencyAnalysis::runtime(), &config, CrateKind::Runtime);
+
+        let parsed: cargo_toml::Manifest = toml::from_str(&manifest).unwrap();
+        assert!(parsed.dependencies.contains_key("postgres-protocol"));
+        // `serde_json` is the price of always emitting `JsonSql`
+        assert!(parsed.dependencies.contains_key("serde_json"));
+        // Only the generated queries use `futures`
+        assert!(!parsed.dependencies.contains_key("futures"));
+    }
+
+    #[test]
+    fn async_only_runtime_does_not_declare_postgres() {
+        let config = Config::builder().r#async(true).sync(false).build();
+
+        let runtime = gen_cargo_file(&DependencyAnalysis::runtime(), &config, CrateKind::Runtime);
+        let parsed: cargo_toml::Manifest = toml::from_str(&runtime).unwrap();
+        assert!(!parsed.dependencies.contains_key("postgres"));
+        assert_eq!(
+            features(&runtime, "default"),
+            Some(vec!["deadpool".to_string()])
+        );
+
+        // A crate holding queries keeps it, its sync query code names it directly
+        let queries = gen_cargo_file(&DependencyAnalysis::default(), &config, CrateKind::Queries);
+        let parsed: cargo_toml::Manifest = toml::from_str(&queries).unwrap();
+        assert!(parsed.dependencies.contains_key("postgres"));
+        assert_eq!(
+            features(&queries, "default"),
+            Some(vec!["dep:postgres".to_string(), "deadpool".to_string()])
+        );
     }
 
     #[test]
