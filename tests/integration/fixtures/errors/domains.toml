@@ -1,0 +1,5 @@
+[[test]]
+name = "UnknownDomainMapping"
+domains = { iccid = "vibe_sim::Iccid" }
+error = """
+× unknown domain `iccid` in `types.domains`: no such domain exists in the schema"""

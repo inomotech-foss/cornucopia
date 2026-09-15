@@ -1,0 +1,13 @@
+destination = "codegen"
+sync = true
+async = false
+
+[manifest.package]
+name = "domain_mapping_codegen"
+publish = false
+
+[manifest.dependencies]
+iccid_type = { path = "../iccid_type" }
+
+[types.domains]
+iccid = "iccid_type::Iccid"

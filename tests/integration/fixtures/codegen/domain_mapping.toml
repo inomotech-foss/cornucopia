@@ -1,0 +1,6 @@
+[[test]]
+name = "Domain mapping"
+base_path = "tests/domain_mapping"
+destination = "codegen"
+run = true
+config = true

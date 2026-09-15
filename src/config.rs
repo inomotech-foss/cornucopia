@@ -139,6 +139,7 @@ impl Default for Config {
                 mapping: HashMap::new(),
                 derive_traits: vec![],
                 custom: HashMap::new(),
+                domains: HashMap::new(),
                 type_traits_mapping: HashMap::new(),
                 type_attributes_mapping: HashMap::new(),
             },
@@ -188,6 +189,19 @@ pub struct Types {
     /// Configuration for custom postgres types (enums, composites, domains)
     #[serde(default)]
     pub custom: HashMap<String, CustomTypeConfig>,
+    /// Maps a domain's name to a Rust type used in its place.
+    ///
+    /// By default, an unmapped domain is transparently treated as its base type: parameters
+    /// need no SQL cast and rows are read as the base type. Naming a domain here overrides
+    /// that default: generated parameter structs take the mapped type by reference and row
+    /// structs return it by value, instead of the base type.
+    ///
+    /// The named type is used as-is, so it must implement `postgres_types::ToSql` and
+    /// `FromSql` such that it accepts the domain itself, not its base type (typically by
+    /// matching `postgres_types::Kind::Domain` in `accepts` rather than the base type's
+    /// `Kind::Simple`/etc). Cornucopia does not wrap it, unlike the unmapped fallback.
+    #[serde(default)]
+    pub domains: HashMap<String, String>,
     /// Mapping for custom postgres types (eg. domains, enums, etc) to derive traits
     /// Deprecated: use `custom` instead
     #[serde(rename = "type-traits-mapping", default)]
@@ -486,6 +500,19 @@ impl ConfigBuilder {
         self
     }
 
+    /// Map a domain's name to a Rust type used in its place
+    pub fn add_domain_mapping(
+        mut self,
+        domain: impl Into<String>,
+        rust_type: impl Into<String>,
+    ) -> Self {
+        self.config
+            .types
+            .domains
+            .insert(domain.into(), rust_type.into());
+        self
+    }
+
     /// Add a derive trait for all generated structs/types
     pub fn add_derive_trait(mut self, trait_name: impl Into<String>) -> Self {
         self.config.types.derive_traits.push(trait_name.into());
@@ -612,6 +639,26 @@ version = "2.0.0"
             .package
             .expect("package section should exist");
         assert_eq!(package.name, "db-runtime");
+    }
+
+    #[test]
+    fn domain_mapping_is_parsed_from_the_domains_table() {
+        let toml_content = r#"
+queries = "db/queries"
+
+[types.domains]
+iccid = "vibe_sim::Iccid"
+"#;
+
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(toml_content.as_bytes()).unwrap();
+
+        let config = Config::from_file(tmpfile.path()).unwrap();
+
+        assert_eq!(
+            config.types.domains.get("iccid").map(String::as_str),
+            Some("vibe_sim::Iccid")
+        );
     }
 
     #[test]

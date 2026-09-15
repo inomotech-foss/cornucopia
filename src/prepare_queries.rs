@@ -11,7 +11,7 @@ use crate::{
     config::Config,
     parser::{Module, NullableIdent, Query, Span, TypeAnnotation},
     read_queries::ModuleInfo,
-    type_registrar::{CornucopiaType, TypeRegistrar},
+    type_registrar::{self, CornucopiaType, TypeRegistrar},
     utils::KEYWORD,
     validation,
 };
@@ -327,6 +327,8 @@ pub(crate) fn prepare(
     modules: Vec<Module>,
     config: &Config,
 ) -> Result<Preparation, Error> {
+    type_registrar::validate_domain_mappings(client, config)?;
+
     let stmts = prepare_sql(client, &modules);
     let mut registrar = TypeRegistrar::new(config.clone());
     let mut prepared_types: IndexMap<String, Vec<PreparedType>> = IndexMap::new();

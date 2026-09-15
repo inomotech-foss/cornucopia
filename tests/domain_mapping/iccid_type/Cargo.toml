@@ -1,0 +1,9 @@
+[package]
+name = "iccid_type"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+postgres-types = "0.2.8"
+bytes = "1.10.1"

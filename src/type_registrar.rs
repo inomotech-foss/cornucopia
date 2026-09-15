@@ -509,6 +509,15 @@ impl TypeRegistrar {
                     ..
                 } => Some((rust_type.to_string(), borrowed_type.clone(), *is_copy)),
             }
+        } else if let Kind::Domain(_) = ty.kind() {
+            // A domain-specific mapping overrides the default of transparently falling
+            // back to the base type. The mapped type is used as-is (not wrapped), so it
+            // has to accept the domain itself; see the `types.domains` doc comment.
+            self.config
+                .types
+                .domains
+                .get(ty.name())
+                .map(|rust_type| (rust_type.clone(), None, false))
         } else {
             None
         };
@@ -556,6 +565,32 @@ impl std::ops::Index<&Type> for TypeRegistrar {
     }
 }
 
+/// Checks that every domain named in `types.domains` exists in the schema. Domains that are
+/// never referenced by a query are otherwise never looked at, so this cannot rely on type
+/// registration alone and queries `pg_type` directly.
+pub(crate) fn validate_domain_mappings(
+    client: &tokio_postgres::Client,
+    config: &Config,
+) -> Result<(), Error> {
+    if config.types.domains.is_empty() {
+        return Ok(());
+    }
+
+    let rows = futures::executor::block_on(
+        client.query("SELECT typname FROM pg_type WHERE typtype = 'd'", &[]),
+    )?;
+    let known_domains: std::collections::HashSet<String> =
+        rows.iter().map(|row| row.get::<_, String>(0)).collect();
+
+    for name in config.types.domains.keys() {
+        if !known_domains.contains(name) {
+            return Err(Error::UnknownDomain { name: name.clone() });
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) mod error {
     use std::sync::Arc;
 
@@ -574,5 +609,111 @@ pub(crate) mod error {
             col_name: String,
             col_ty: String,
         },
+        #[error("unknown domain `{name}` in `types.domains`: no such domain exists in the schema")]
+        UnknownDomain {
+            name: String,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::codegen::{GenCtx, ModCtx};
+
+    fn dummy_span(value: &str) -> Span<String> {
+        Span {
+            span: (0..0).into(),
+            value: value.to_string(),
+        }
+    }
+
+    fn dummy_module_info() -> ModuleInfo {
+        ModuleInfo {
+            path: "test.sql".into(),
+            name: "test".to_string(),
+            full_module_path: "test".to_string(),
+            content: Arc::new(String::new()),
+        }
+    }
+
+    /// An unmapped domain has to be transparently resolved to its base type: this is what
+    /// lets an unmapped domain-typed parameter work without an explicit SQL cast, and a
+    /// domain-typed column read back as the base Rust type.
+    #[test]
+    fn unmapped_domain_falls_back_to_its_base_type() {
+        let mut registrar = TypeRegistrar::new(Config::default());
+        let domain = Type::new(
+            "my_domain".to_string(),
+            100_000,
+            Kind::Domain(Type::TEXT),
+            "public".to_string(),
+        );
+
+        let ty = registrar
+            .register("col", &domain, &dummy_span("q"), &dummy_module_info())
+            .unwrap()
+            .clone();
+
+        assert!(matches!(&*ty, CornucopiaType::Domain { .. }));
+        assert_eq!(
+            ty.own_ty(false, &GenCtx::new(ModCtx::Types, true)),
+            "String"
+        );
+        // The `Domain` wrapper is what lets the value be sent without a `::text` cast.
+        assert_eq!(ty.sql_wrapped("value"), "&crate::Domain(value)");
+    }
+
+    /// A domain named in `types.domains` bypasses the base-type fallback entirely: the
+    /// mapped type is used as-is, unwrapped, so it must accept the domain itself.
+    #[test]
+    fn mapped_domain_uses_the_configured_rust_type() {
+        let config = Config::builder()
+            .add_domain_mapping("iccid", "vibe_sim::Iccid")
+            .build();
+        let mut registrar = TypeRegistrar::new(config);
+        let domain = Type::new(
+            "iccid".to_string(),
+            100_001,
+            Kind::Domain(Type::TEXT),
+            "public".to_string(),
+        );
+
+        let ty = registrar
+            .register("iccid", &domain, &dummy_span("q"), &dummy_module_info())
+            .unwrap()
+            .clone();
+
+        assert!(matches!(&*ty, CornucopiaType::Simple { .. }));
+        assert_eq!(
+            ty.own_ty(false, &GenCtx::new(ModCtx::Types, true)),
+            "vibe_sim::Iccid"
+        );
+        assert!(!ty.is_copy());
+        assert_eq!(ty.sql_wrapped("value"), "value");
+    }
+
+    /// Mapping one domain must not affect an unrelated, unmapped one.
+    #[test]
+    fn domain_mapping_does_not_affect_other_domains() {
+        let config = Config::builder()
+            .add_domain_mapping("iccid", "vibe_sim::Iccid")
+            .build();
+        let mut registrar = TypeRegistrar::new(config);
+        let domain = Type::new(
+            "my_domain".to_string(),
+            100_002,
+            Kind::Domain(Type::TEXT),
+            "public".to_string(),
+        );
+
+        let ty = registrar
+            .register("col", &domain, &dummy_span("q"), &dummy_module_info())
+            .unwrap()
+            .clone();
+
+        assert!(matches!(&*ty, CornucopiaType::Domain { .. }));
     }
 }

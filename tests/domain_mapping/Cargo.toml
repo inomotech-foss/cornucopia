@@ -1,0 +1,13 @@
+[package]
+name = "domain_mapping_test"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Cornucopia
+codegen = { path = "codegen", package = "domain_mapping_codegen" }
+# The mapped type
+iccid_type = { path = "iccid_type" }
+# rust-postgres interaction
+postgres = "0.19.9"

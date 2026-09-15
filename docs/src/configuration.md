@@ -245,6 +245,26 @@ Additionally, the borrowed type should implement `Into<OwnedType>` so the genera
 See the [custom_types](https://github.com/cornucopia-rs/cornucopia/blob/main/examples/custom_types) example for a reference implementation.
 ~~~
 
+## Domain mapping
+
+By default, a [domain](https://www.postgresql.org/docs/current/domains.html) is transparently treated as its base type: a domain-typed parameter needs no SQL cast, and a domain-typed column is read as the base type. The `types.domains` table lets you override that default for a specific domain, mapping it to a Rust type of your own instead:
+
+```toml
+[manifest.dependencies]
+vibe_sim = { path = "../vibe_sim" }
+
+[types.domains]
+iccid = "vibe_sim::Iccid"
+```
+
+With this, generated parameter structs take `&'a vibe_sim::Iccid` where the `iccid` domain is used, and row structs return `vibe_sim::Iccid` by value.
+
+~~~admonish note
+Unlike the base-type fallback, a mapped domain is **not** wrapped by Cornucopia. The named type is used as-is, so it must implement [`ToSql`](https://docs.rs/postgres-types/latest/postgres_types/trait.ToSql.html) and [`FromSql`](https://docs.rs/postgres-types/latest/postgres_types/trait.FromSql.html) such that it accepts the domain itself, not its base type. This typically means matching `postgres_types::Kind::Domain` in `accepts` rather than the base type's `Kind::Simple` (or whatever kind the base type has).
+
+Every key in `types.domains` must name a domain that exists in your schema; codegen fails with a clear error if it doesn't.
+~~~
+
 ## Derive traits
 You can specify `#[derive]` traits for generated structs using this field.
 

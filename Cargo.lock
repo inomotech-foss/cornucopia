@@ -1159,6 +1159,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "domain_mapping_codegen"
+version = "0.0.0"
+dependencies = [
+ "iccid_type",
+ "postgres",
+ "postgres-protocol",
+ "postgres-types",
+]
+
+[[package]]
+name = "domain_mapping_test"
+version = "0.1.0"
+dependencies = [
+ "domain_mapping_codegen",
+ "iccid_type",
+ "postgres",
+]
+
+[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1644,6 +1663,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "iccid_type"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "postgres-types",
 ]
 
 [[package]]

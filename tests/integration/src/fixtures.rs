@@ -90,15 +90,21 @@ pub(crate) struct ErrorTest {
     pub(crate) name: String,
     pub(crate) query: Option<String>,
     pub(crate) schema: Option<String>,
+    /// `types.domains` entries, for tests covering domain-mapping config errors
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) domains: std::collections::HashMap<String, String>,
     pub(crate) error: String,
 }
 
 impl From<&ErrorTest> for Config {
-    fn from(_error_test: &ErrorTest) -> Self {
-        Config::builder()
+    fn from(error_test: &ErrorTest) -> Self {
+        let mut builder = Config::builder()
             .r#async(false)
             .sync(true)
-            .derive_traits(vec!["serde::Serialize".to_string()])
-            .build()
+            .derive_traits(vec!["serde::Serialize".to_string()]);
+        for (domain, rust_type) in &error_test.domains {
+            builder = builder.add_domain_mapping(domain.clone(), rust_type.clone());
+        }
+        builder.build()
     }
 }
