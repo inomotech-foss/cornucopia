@@ -77,6 +77,9 @@ pub struct PreparedField {
     pub(crate) attributes: Vec<String>,          // Custom field attributes
     pub(crate) attributes_borrowed: Vec<String>, // Custom field attributes for borrowed structs
     pub(crate) nested_nullability: std::collections::HashMap<String, bool>, // Field name -> nullable
+    /// Set for a `col: domain_name` row override: the `crate::types::*RowValue` wrapper to
+    /// extract this field through, instead of extracting `ty` directly.
+    pub(crate) domain_row_wrapper: Option<String>,
 }
 
 impl PreparedField {
@@ -102,12 +105,18 @@ impl PreparedField {
             attributes: Vec::new(),
             attributes_borrowed: Vec::new(),
             nested_nullability,
+            domain_row_wrapper: None,
         }
     }
 
     pub(crate) fn with_attributes(mut self, attributes: (Vec<String>, Vec<String>)) -> Self {
         self.attributes = attributes.0;
         self.attributes_borrowed = attributes.1;
+        self
+    }
+
+    pub(crate) fn with_domain_row_wrapper(mut self, wrapper: String) -> Self {
+        self.domain_row_wrapper = Some(wrapper);
         self
     }
 }
@@ -195,6 +204,8 @@ pub(crate) struct Preparation {
     pub(crate) modules: Vec<PreparedModule>,
     pub(crate) types: IndexMap<String, Vec<PreparedType>>,
     pub(crate) dependency_analysis: DependencyAnalysis,
+    /// Domains used through a row override, keyed by domain name, to their mapped Rust type.
+    pub(crate) domain_row_overrides: IndexMap<String, String>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -346,7 +357,7 @@ pub(crate) fn prepare(
 
     for module in modules {
         let (prepared_module, module_nested_specs) =
-            prepare_module(&stmts, module, &mut registrar)?;
+            prepare_module(client, &stmts, module, &mut registrar)?;
 
         prepared_modules.push(prepared_module);
 
@@ -382,6 +393,7 @@ pub(crate) fn prepare(
         modules: prepared_modules,
         types: prepared_types,
         dependency_analysis: registrar.dependency_analysis,
+        domain_row_overrides: registrar.domain_row_overrides,
     })
 }
 
@@ -437,6 +449,7 @@ fn prepare_type(
                                     nullable: true,
                                     inner_nullable: false,
                                     nested_fields: Vec::new(),
+                                    domain_override: None,
                                 });
                             }
                         }
@@ -491,6 +504,7 @@ fn prepare_sql(
 #[allow(clippy::result_large_err)]
 /// Prepares all queries in this module and collects nested nullability specifications
 fn prepare_module(
+    client: &Client,
     stmts: &HashMap<String, Result<Statement, tokio_postgres::Error>>,
     module: Module,
     registrar: &mut TypeRegistrar,
@@ -511,6 +525,7 @@ fn prepare_module(
 
     for query in module.queries {
         let query_nested_specs = prepare_query(
+            client,
             stmts,
             &mut tmp_prepared_module,
             registrar,
@@ -536,6 +551,7 @@ fn prepare_module(
 #[allow(clippy::result_large_err)]
 /// Prepares a query
 fn prepare_query(
+    client: &Client,
     stmts: &HashMap<String, Result<Statement, tokio_postgres::Error>>,
     module: &mut PreparedModule,
     registrar: &mut TypeRegistrar,
@@ -640,10 +656,30 @@ fn prepare_query(
             // Collect nested nullability specifications from ALL matching entries
             collect_nested_specs(&matching_nullities, col_ty, &mut nested_specs);
 
-            // Register type
-            let ty = registrar
-                .register(&col_name, col_ty, &name, module_info)?
-                .clone();
+            let domain_override = nullity.and_then(|n| n.domain_override.as_ref());
+
+            // Register type: a `col: domain_name` override resolves through `types.domains`
+            // instead of the column's reported (always base) type, since that is the only way
+            // to recover a domain in row position.
+            let (ty, domain_row_wrapper) = if let Some(domain_override) = domain_override {
+                let ty = registrar.resolve_row_domain_override(
+                    client,
+                    &domain_override.value,
+                    col_ty,
+                )?;
+                let wrapper = format!(
+                    "crate::types::{}",
+                    type_registrar::domain_row_wrapper_name(&domain_override.value)
+                );
+                (ty, Some(wrapper))
+            } else {
+                (
+                    registrar
+                        .register(&col_name, col_ty, &name, module_info)?
+                        .clone(),
+                    None,
+                )
+            };
 
             let is_nullable = nullity.is_some_and(|n| n.nullable);
             let attributes = if let Some(mapping) = registrar.get_type_mapping(col_ty) {
@@ -652,10 +688,12 @@ fn prepare_query(
                 (Vec::new(), Vec::new())
             };
 
-            row_fields.push(
-                PreparedField::new(normalize_rust_name(&col_name), ty, nullity)
-                    .with_attributes(attributes),
-            );
+            let mut field = PreparedField::new(normalize_rust_name(&col_name), ty, nullity)
+                .with_attributes(attributes);
+            if let Some(wrapper) = domain_row_wrapper {
+                field = field.with_domain_row_wrapper(wrapper);
+            }
+            row_fields.push(field);
         }
         row_fields
     };

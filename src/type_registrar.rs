@@ -361,6 +361,9 @@ impl CornucopiaType {
 pub(crate) struct TypeRegistrar {
     pub types: IndexMap<(String, String), Rc<CornucopiaType>>,
     pub dependency_analysis: DependencyAnalysis,
+    /// Domains used through a `col: domain_name` row override, keyed by domain name. Each
+    /// one needs a row-decode wrapper generated in `types.rs`; see `domain_row_wrapper_name`.
+    pub domain_row_overrides: IndexMap<String, String>,
     config: Config,
 }
 
@@ -369,6 +372,7 @@ impl TypeRegistrar {
         Self {
             types: IndexMap::default(),
             dependency_analysis: DependencyAnalysis::default(),
+            domain_row_overrides: IndexMap::default(),
             config,
         }
     }
@@ -376,6 +380,28 @@ impl TypeRegistrar {
     /// Returns the type mapping for a specific type
     pub(crate) fn get_type_mapping(&self, ty: &Type) -> Option<&TypeMapping> {
         self.config.get_type_mapping(ty)
+    }
+
+    /// Resolves a `col: domain_name` row override into the `CornucopiaType` its field should
+    /// use, and records that the domain needs a row-decode wrapper generated.
+    ///
+    /// `col_ty` is the type PostgreSQL actually reported for the column (always the domain's
+    /// base type, per the `types.domains` doc comment): see `resolve_row_domain_override` for
+    /// what is checked.
+    pub(crate) fn resolve_row_domain_override(
+        &mut self,
+        client: &tokio_postgres::Client,
+        domain_name: &str,
+        col_ty: &Type,
+    ) -> Result<Rc<CornucopiaType>, Error> {
+        let ty = self::row_domain_override_type(client, &self.config, domain_name, col_ty)?;
+        let CornucopiaType::Simple { rust_name, .. } = &ty else {
+            unreachable!("resolve_row_domain_override always returns CornucopiaType::Simple")
+        };
+        self.domain_row_overrides
+            .entry(domain_name.to_string())
+            .or_insert_with(|| rust_name.clone());
+        Ok(Rc::new(ty))
     }
 
     fn resolve_type(
@@ -591,6 +617,62 @@ pub(crate) fn validate_domain_mappings(
     Ok(())
 }
 
+/// Resolves the [`CornucopiaType`] a `col: domain_name` row override produces for `col_ty`,
+/// the type PostgreSQL actually reported for that result column.
+///
+/// A result column of domain type is always reported as its base type (see the `types.domains`
+/// doc comment), so this is the only way to recover the domain: the caller states it, and this
+/// checks the statement against the schema. Two things can go wrong: the named domain has no
+/// `types.domains` mapping, or `col_ty` isn't actually that domain's base type (a stale
+/// annotation after the column's type changed).
+fn row_domain_override_type(
+    client: &tokio_postgres::Client,
+    config: &Config,
+    domain_name: &str,
+    col_ty: &Type,
+) -> Result<CornucopiaType, Error> {
+    let Some(rust_type) = config.types.domains.get(domain_name) else {
+        return Err(Error::DomainOverrideNotMapped {
+            name: domain_name.to_string(),
+        });
+    };
+
+    let quoted = domain_name.replace('"', "\"\"");
+    let stmt = futures::executor::block_on(client.prepare(&format!("SELECT $1::\"{quoted}\"")))?;
+    let domain_ty = stmt.params()[0].clone();
+    let base = match domain_ty.kind() {
+        Kind::Domain(base) => base,
+        // `types.domains` is already validated against the schema, so a name found there
+        // that isn't actually a domain would be a Cornucopia bug, not a user error.
+        _ => unreachable!("`{domain_name}` is validated to be a domain"),
+    };
+
+    if base.name() != col_ty.name() || base.schema() != col_ty.schema() {
+        return Err(Error::DomainOverrideBaseMismatch {
+            domain: domain_name.to_string(),
+            expected_base: base.name().to_string(),
+            actual: col_ty.name().to_string(),
+        });
+    }
+
+    Ok(CornucopiaType::Simple {
+        // Keep the real domain `Type` (`Kind::Domain`, not `col_ty`'s base kind) so the
+        // `Type::TEXT`/`BYTEA`/etc special cases in `brw_ty`/`is_ref` don't fire for it: those
+        // key off `pg_ty` alone and would otherwise force e.g. `&str` regardless of `rust_name`.
+        pg_ty: domain_ty,
+        rust_name: rust_type.clone(),
+        borrowed_name: None,
+        is_copy: false,
+    })
+}
+
+/// Name of the `FromSql` wrapper generated in `types.rs` for a domain used through a row
+/// override. It reinterprets the reported (base) type as the domain, then defers to the
+/// mapped Rust type's own `FromSql`, exactly as a parameter or composite field would see it.
+pub(crate) fn domain_row_wrapper_name(domain: &str) -> String {
+    format!("{}RowValue", domain.to_upper_camel_case())
+}
+
 pub(crate) mod error {
     use std::sync::Arc;
 
@@ -612,6 +694,18 @@ pub(crate) mod error {
         #[error("unknown domain `{name}` in `types.domains`: no such domain exists in the schema")]
         UnknownDomain {
             name: String,
+        },
+        #[error("domain `{name}` named in a row override has no `types.domains` mapping")]
+        DomainOverrideNotMapped {
+            name: String,
+        },
+        #[error(
+            "row override names domain `{domain}`, whose base type is `{expected_base}`, but the column's reported type is `{actual}`"
+        )]
+        DomainOverrideBaseMismatch {
+            domain: String,
+            expected_base: String,
+            actual: String,
         },
     }
 }
@@ -715,5 +809,11 @@ mod tests {
             .clone();
 
         assert!(matches!(&*ty, CornucopiaType::Domain { .. }));
+    }
+
+    #[test]
+    fn domain_row_wrapper_name_upper_camel_cases_the_domain() {
+        assert_eq!(domain_row_wrapper_name("iccid"), "IccidRowValue");
+        assert_eq!(domain_row_wrapper_name("sim_note"), "SimNoteRowValue");
     }
 }

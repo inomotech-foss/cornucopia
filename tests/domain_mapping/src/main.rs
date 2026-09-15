@@ -1,5 +1,5 @@
 use codegen::{
-    queries::sims::{InsertSimParams, insert_sim, select_sims},
+    queries::sims::{InsertSimParams, insert_sim, select_sim_iccid, select_sims},
     types::SimInfoBorrowed,
 };
 use iccid_type::Iccid;
@@ -16,6 +16,7 @@ pub fn main() {
         .unwrap();
 
     test_mapped_and_unmapped_domains(client);
+    test_row_override(client);
 }
 
 // A mapped domain (`iccid`) is used by its configured Rust type, both as a parameter and,
@@ -42,4 +43,11 @@ pub fn test_mapped_and_unmapped_domains(client: &mut Client) {
     assert_eq!(row.note, "hello");
     assert_eq!(row.info.iccid, Iccid("9876543210987654321".to_string()));
     assert_eq!(row.info.note, "nested");
+}
+
+// PostgreSQL reports a plain `SELECT iccid FROM sims` column as its base type (text), never
+// as the `iccid` domain: only a `col: domain_name` row override recovers the mapped type here.
+pub fn test_row_override(client: &mut Client) {
+    let iccids = select_sim_iccid().bind(client).all().unwrap();
+    assert_eq!(iccids, vec![Iccid("1234567890123456789".to_string())]);
 }

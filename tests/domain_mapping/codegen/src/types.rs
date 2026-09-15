@@ -1,5 +1,26 @@
 // This file was generated with `cornucopia`. Do not modify.
 
+#[doc(hidden)]
+pub struct IccidRowValue(pub iccid_type::Iccid);
+impl<'a> postgres_types::FromSql<'a> for IccidRowValue {
+    fn from_sql(
+        ty: &postgres_types::Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let domain_ty = postgres_types::Type::new(
+            "iccid".to_string(),
+            0,
+            postgres_types::Kind::Domain(ty.clone()),
+            ty.schema().to_string(),
+        );
+        Ok(IccidRowValue(
+            <iccid_type::Iccid as postgres_types::FromSql>::from_sql(&domain_ty, raw)?,
+        ))
+    }
+    fn accepts(_ty: &postgres_types::Type) -> bool {
+        true
+    }
+}
 #[derive(Debug, postgres_types::FromSql, Clone, PartialEq)]
 #[postgres(name = "sim_info")]
 pub struct SimInfo {

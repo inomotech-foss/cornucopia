@@ -421,14 +421,19 @@ fn gen_query_fn(
                 .map(|p| format_ident!("{}", p.ident.rs))
                 .collect();
 
-            let fields_idx: Vec<_> = (0..fields.len())
-                .map(|i| proc_macro2::Literal::usize_unsuffixed(index[i]))
+            let fields_extract: Vec<_> = fields
+                .iter()
+                .zip(index)
+                .map(|(field, &i)| {
+                    let idx = proc_macro2::Literal::usize_unsuffixed(i);
+                    field.row_extract(quote!(#idx))
+                })
                 .collect();
 
             let extractor = quote! {
                 |row: &#backend::Row| -> Result<#path_type, #backend::Error> {
                     Ok(#path_type {
-                        #(#fields_name: row.try_get(#fields_idx)?,)*
+                        #(#fields_name: #fields_extract,)*
                     })
                 }
             };
@@ -457,6 +462,7 @@ fn gen_query_fn(
             let field = &fields[0];
             let field_type = syn::parse_str::<syn::Type>(&field.own_struct(ctx)).unwrap();
             let owning_call = syn::parse_str::<syn::Expr>(&field.owning_call(Some("it"))).unwrap();
+            let field_extract = field.row_extract(quote!(0));
 
             quote! {
                 #bind_visibility fn bind<'c, 'a, 's, C: GenericClient, #(#traits_idents: #traits_bounds,)*>(
@@ -469,7 +475,7 @@ fn gen_query_fn(
                         params: [#(#params_name,)*],
                         query: self.0,
                         cached: self.1.as_ref(),
-                        extractor: |row| Ok(row.try_get(0)?),
+                        extractor: |row| Ok(#field_extract),
                         mapper: |it| #owning_call,
                     }
                 }

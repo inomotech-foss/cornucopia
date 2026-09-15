@@ -134,6 +134,10 @@ pub struct NullableIdent {
     pub nullable: bool,
     pub inner_nullable: bool,
     pub nested_fields: Vec<FieldSegment>,
+    /// `col: domain_name` override: read this column as the domain named, resolved through
+    /// `types.domains`. PostgreSQL always reports a domain-typed result column as its base
+    /// type, so this is how a query author declares what the wire cannot.
+    pub domain_override: Option<Span<String>>,
 }
 
 impl NullableIdent {
@@ -158,11 +162,15 @@ fn parse_field_segment<'src>()
 
 fn parse_nullable_ident<'src>()
 -> impl Parser<'src, &'src str, Vec<NullableIdent>, extra::Err<Simple<'src, char>>> {
+    // `: domain_name` override, naming the domain a result column should be read as
+    let domain_override = just(':').ignore_then(space()).ignore_then(ident()).or_not();
+
     let single_ident = space()
         .ignore_then(
             ident()
                 .then(just('?').or_not())
                 .then(just("[?]").or_not())
+                .then(domain_override)
                 .then(
                     // Parse nested field paths like .field or [].field
                     choice((
@@ -179,21 +187,24 @@ fn parse_nullable_ident<'src>()
                     .repeated()
                     .collect::<Vec<_>>(),
                 )
-                .map(|(((name, nullable), array_nullable), nested_accesses)| {
-                    let mut nested_fields = Vec::new();
+                .map(
+                    |((((name, nullable), array_nullable), domain_override), nested_accesses)| {
+                        let mut nested_fields = Vec::new();
 
-                    for (mut segment, is_array_access) in nested_accesses {
-                        segment.is_array = is_array_access;
-                        nested_fields.push(segment);
-                    }
+                        for (mut segment, is_array_access) in nested_accesses {
+                            segment.is_array = is_array_access;
+                            nested_fields.push(segment);
+                        }
 
-                    NullableIdent {
-                        name,
-                        nullable: nullable.is_some(),
-                        inner_nullable: array_nullable.is_some(),
-                        nested_fields,
-                    }
-                }),
+                        NullableIdent {
+                            name,
+                            nullable: nullable.is_some(),
+                            inner_nullable: array_nullable.is_some(),
+                            nested_fields,
+                            domain_override,
+                        }
+                    },
+                ),
         )
         .then_ignore(space());
 
@@ -985,5 +996,45 @@ mod tests {
         assert_eq!(query.bind_params.len(), 1);
         assert_eq!(query.bind_params[0].value, "v");
         assert_eq!(query.sql_str, "SELECT \"à\" FROM t WHERE \"à\" = $1");
+    }
+
+    #[test]
+    fn parse_domain_override() {
+        let sql = "--! q: (iccid: iccid, note?)\nSELECT iccid, note FROM sims;";
+        let module = parse_query_module(module_from(sql)).expect("should parse");
+        let idents = module.queries[0]
+            .row
+            .idents
+            .as_ref()
+            .expect("row idents should be present");
+
+        let iccid = idents.iter().find(|i| i.name.value == "iccid").unwrap();
+        assert_eq!(
+            iccid.domain_override.as_ref().map(|s| s.value.as_str()),
+            Some("iccid")
+        );
+        assert!(!iccid.nullable);
+
+        let note = idents.iter().find(|i| i.name.value == "note").unwrap();
+        assert!(note.domain_override.is_none());
+        assert!(note.nullable);
+    }
+
+    #[test]
+    fn parse_domain_override_with_nullable() {
+        let sql = "--! q: (iccid?: iccid)\nSELECT iccid FROM sims;";
+        let module = parse_query_module(module_from(sql)).expect("should parse");
+        let idents = module.queries[0]
+            .row
+            .idents
+            .as_ref()
+            .expect("row idents should be present");
+
+        let iccid = &idents[0];
+        assert!(iccid.nullable);
+        assert_eq!(
+            iccid.domain_override.as_ref().map(|s| s.value.as_str()),
+            Some("iccid")
+        );
     }
 }

@@ -257,13 +257,30 @@ vibe_sim = { path = "../vibe_sim" }
 iccid = "vibe_sim::Iccid"
 ```
 
-With this, generated parameter structs take `&'a vibe_sim::Iccid` where the `iccid` domain is used, and row structs return `vibe_sim::Iccid` by value.
+With this, generated parameter structs take `&'a vibe_sim::Iccid` where the `iccid` domain is used as a parameter, and a domain used as a field of a composite type (in either position) is `vibe_sim::Iccid` by value.
 
 ~~~admonish note
 Unlike the base-type fallback, a mapped domain is **not** wrapped by Cornucopia. The named type is used as-is, so it must implement [`ToSql`](https://docs.rs/postgres-types/latest/postgres_types/trait.ToSql.html) and [`FromSql`](https://docs.rs/postgres-types/latest/postgres_types/trait.FromSql.html) such that it accepts the domain itself, not its base type. This typically means matching `postgres_types::Kind::Domain` in `accepts` rather than the base type's `Kind::Simple` (or whatever kind the base type has).
 
 Every key in `types.domains` must name a domain that exists in your schema; codegen fails with a clear error if it doesn't.
 ~~~
+
+### Row column overrides
+
+PostgreSQL never reports a plain result column as a domain: `SELECT iccid FROM sims` always describes that column as `text`, the `iccid` domain's base type, even though the table declares it as `iccid`. This is a PostgreSQL limitation, not a Cornucopia one, and it applies to any expression in a `SELECT` list, not just bare columns. A domain nested inside a composite value is unaffected (its member types come from the composite's own definition, not from the query's result description), which is why parameters and composite fields don't need this.
+
+To get a mapped domain back from an ordinary result column, say so in the row annotation with `col: domain_name`:
+
+```
+--! select_sim_iccid: (iccid: iccid)
+SELECT iccid FROM sims;
+```
+
+This reads the `iccid` column as `vibe_sim::Iccid`, resolved through the same `types.domains` mapping used everywhere else, by value. `col?: domain_name` combines the override with a nullability annotation.
+
+Two things make this fail at codegen time rather than silently doing the wrong thing:
+- The named domain has no `types.domains` mapping.
+- The column's actual reported type doesn't match the domain's base type. This catches a stale annotation left behind after the column's type changed; it does not catch confusing two domains that happen to share the same base type, since PostgreSQL doesn't report enough to tell them apart in this position either.
 
 ## Derive traits
 You can specify `#[derive]` traits for generated structs using this field.

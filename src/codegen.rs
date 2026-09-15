@@ -124,6 +124,22 @@ impl PreparedField {
             quote!(#field_name: #call_expr)
         }
     }
+
+    /// Code to read this field from a row at `idx`. A `col: domain_name` row override reads
+    /// through its `crate::types::*RowValue` wrapper instead of the field's own type, since
+    /// PostgreSQL always reports a domain-typed column as its base type.
+    pub fn row_extract(&self, idx: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+        let Some(wrapper) = &self.domain_row_wrapper else {
+            return quote!(row.try_get(#idx)?);
+        };
+
+        let wrapper = syn::parse_str::<syn::Path>(wrapper).unwrap();
+        if self.is_nullable {
+            quote!(row.try_get::<_, Option<#wrapper>>(#idx)?.map(|w| w.0))
+        } else {
+            quote!(row.try_get::<_, #wrapper>(#idx)?.0)
+        }
+    }
 }
 
 pub fn idx_char(idx: usize) -> String {
@@ -138,7 +154,11 @@ pub(crate) fn generate(preparation: Preparation, config: &Config) -> Vfs {
         "src/lib.rs",
         client::gen_lib(&preparation.dependency_analysis, config),
     );
-    let types = gen_type_modules(&preparation.types, config);
+    let types = gen_type_modules(
+        &preparation.types,
+        &preparation.domain_row_overrides,
+        config,
+    );
     vfs.add("src/types.rs", types);
     queries::gen_queries(&mut vfs, &preparation, config);
     client::gen_clients(&mut vfs, &preparation.dependency_analysis, config);

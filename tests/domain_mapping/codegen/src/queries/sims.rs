@@ -87,6 +87,65 @@ where
         Ok(mapped)
     }
 }
+pub struct IccidtypeIccidQuery<'c, 'a, 's, C: GenericClient, T, const N: usize> {
+    client: &'c mut C,
+    params: [&'a (dyn postgres_types::ToSql + Sync); N],
+    query: &'static str,
+    cached: Option<&'s postgres::Statement>,
+    extractor: fn(&postgres::Row) -> Result<iccid_type::Iccid, postgres::Error>,
+    mapper: fn(iccid_type::Iccid) -> T,
+}
+impl<'c, 'a, 's, C, T: 'c, const N: usize> IccidtypeIccidQuery<'c, 'a, 's, C, T, N>
+where
+    C: GenericClient,
+{
+    pub fn map<R>(
+        self,
+        mapper: fn(iccid_type::Iccid) -> R,
+    ) -> IccidtypeIccidQuery<'c, 'a, 's, C, R, N> {
+        IccidtypeIccidQuery {
+            client: self.client,
+            params: self.params,
+            query: self.query,
+            cached: self.cached,
+            extractor: self.extractor,
+            mapper,
+        }
+    }
+    pub fn one(self) -> Result<T, postgres::Error> {
+        let row = crate::client::sync::one(self.client, self.query, &self.params, self.cached)?;
+        Ok((self.mapper)((self.extractor)(&row)?))
+    }
+    pub fn all(self) -> Result<Vec<T>, postgres::Error> {
+        self.iter()?.collect()
+    }
+    pub fn opt(self) -> Result<Option<T>, postgres::Error> {
+        let opt_row = crate::client::sync::opt(self.client, self.query, &self.params, self.cached)?;
+        Ok(opt_row
+            .map(|row| {
+                let extracted = (self.extractor)(&row)?;
+                Ok((self.mapper)(extracted))
+            })
+            .transpose()?)
+    }
+    pub fn iter(
+        self,
+    ) -> Result<impl Iterator<Item = Result<T, postgres::Error>> + 'c, postgres::Error> {
+        let stream = crate::client::sync::raw(
+            self.client,
+            self.query,
+            crate::slice_iter(&self.params),
+            self.cached,
+        )?;
+        let mapped = stream.iterator().map(move |res| {
+            res.and_then(|row| {
+                let extracted = (self.extractor)(&row)?;
+                Ok((self.mapper)(extracted))
+            })
+        });
+        Ok(mapped)
+    }
+}
 pub struct InsertSimStmt(&'static str, Option<postgres::Statement>);
 pub fn insert_sim() -> InsertSimStmt {
     InsertSimStmt(
@@ -159,6 +218,32 @@ impl SelectSimsStmt {
                 })
             },
             mapper: |it| SelectSims::from(it),
+        }
+    }
+}
+pub struct SelectSimIccidStmt(&'static str, Option<postgres::Statement>);
+pub fn select_sim_iccid() -> SelectSimIccidStmt {
+    SelectSimIccidStmt("SELECT iccid FROM sims", None)
+}
+impl SelectSimIccidStmt {
+    pub fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a mut C,
+    ) -> Result<Self, postgres::Error> {
+        self.1 = Some(client.prepare(self.0)?);
+        Ok(self)
+    }
+    pub fn bind<'c, 'a, 's, C: GenericClient>(
+        &'s self,
+        client: &'c mut C,
+    ) -> IccidtypeIccidQuery<'c, 'a, 's, C, iccid_type::Iccid, 0> {
+        IccidtypeIccidQuery {
+            client,
+            params: [],
+            query: self.0,
+            cached: self.1.as_ref(),
+            extractor: |row| Ok(row.try_get::<_, crate::types::IccidRowValue>(0)?.0),
+            mapper: |it| it.into(),
         }
     }
 }

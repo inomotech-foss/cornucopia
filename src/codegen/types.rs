@@ -6,12 +6,14 @@ use crate::{
     codegen::ModCtx,
     config::Config,
     prepare_queries::{Ident, PreparedContent, PreparedField, PreparedType},
+    type_registrar::domain_row_wrapper_name,
 };
 
 use super::GenCtx;
 
 pub(crate) fn gen_type_modules(
     prepared: &IndexMap<String, Vec<PreparedType>>,
+    domain_row_overrides: &IndexMap<String, String>,
     config: &Config,
 ) -> proc_macro2::TokenStream {
     let mut tokens = proc_macro2::TokenStream::new();
@@ -26,6 +28,8 @@ pub(crate) fn gen_type_modules(
         };
         tokens.extend(field_meta_struct);
     }
+
+    tokens.extend(gen_domain_row_wrappers(domain_row_overrides));
 
     for (schema, types) in prepared {
         if schema == "public" {
@@ -51,6 +55,56 @@ pub(crate) fn gen_type_modules(
                 });
             }
         }
+    }
+
+    tokens
+}
+
+/// Generates a `FromSql` row-decode wrapper for each domain used through a `col: domain_name`
+/// row override. PostgreSQL always reports a domain-typed result column as its base type (see
+/// the `types.domains` doc comment), so the wrapper reinterprets that reported type as the
+/// named domain before handing it to the mapped Rust type's own `FromSql`, matching what that
+/// type would see in a parameter or composite field position.
+///
+/// The wrapper's `accepts` always returns `true`: the match between the override and the
+/// column's actual type was already checked when the query was prepared, and the wrapper is
+/// only ever named internally, for this one field.
+fn gen_domain_row_wrappers(
+    domain_row_overrides: &IndexMap<String, String>,
+) -> proc_macro2::TokenStream {
+    let mut tokens = proc_macro2::TokenStream::new();
+
+    for (domain, rust_type) in domain_row_overrides {
+        let wrapper_ident = format_ident!("{}", domain_row_wrapper_name(domain));
+        let rust_ty = syn::parse_str::<syn::Type>(rust_type)
+            .unwrap_or_else(|e| panic!("invalid `types.domains` Rust type `{rust_type}`: {e}"));
+        let domain_lit = syn::LitStr::new(domain, proc_macro2::Span::call_site());
+
+        tokens.extend(quote! {
+            #[doc(hidden)]
+            pub struct #wrapper_ident(pub #rust_ty);
+
+            impl<'a> postgres_types::FromSql<'a> for #wrapper_ident {
+                fn from_sql(
+                    ty: &postgres_types::Type,
+                    raw: &'a [u8],
+                ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+                    let domain_ty = postgres_types::Type::new(
+                        #domain_lit.to_string(),
+                        0,
+                        postgres_types::Kind::Domain(ty.clone()),
+                        ty.schema().to_string(),
+                    );
+                    Ok(#wrapper_ident(<#rust_ty as postgres_types::FromSql>::from_sql(
+                        &domain_ty, raw,
+                    )?))
+                }
+
+                fn accepts(_ty: &postgres_types::Type) -> bool {
+                    true
+                }
+            }
+        });
     }
 
     tokens

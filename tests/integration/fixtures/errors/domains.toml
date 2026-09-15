@@ -3,3 +3,30 @@ name = "UnknownDomainMapping"
 domains = { iccid = "vibe_sim::Iccid" }
 error = """
 × unknown domain `iccid` in `types.domains`: no such domain exists in the schema"""
+
+[[test]]
+name = "DomainOverrideNotMapped"
+schema = """
+CREATE DOMAIN untracked_domain AS text;
+CREATE TABLE widgets (untracked untracked_domain);
+"""
+query = """
+--! widget: (untracked: untracked_domain)
+SELECT untracked FROM widgets;
+"""
+error = """
+× domain `untracked_domain` named in a row override has no `types.domains` mapping"""
+
+[[test]]
+name = "DomainOverrideBaseMismatch"
+domains = { iccid = "vibe_sim::Iccid" }
+schema = """
+CREATE DOMAIN iccid AS text;
+CREATE TABLE widgets (count integer);
+"""
+query = """
+--! widget: (count: iccid)
+SELECT count FROM widgets;
+"""
+error = """
+× row override names domain `iccid`, whose base type is `text`, but the column's reported type is `int4`"""

@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `wasm-features` option to suppress the `wasm-async`/`wasm-sync` feature on the generated crate
 - `shared-runtime` option and `cornucopia runtime` command, to hold the client scaffold in a crate of its own instead of emitting a copy of it into every generated crate
 - `types.domains` option to map a domain to a caller-provided Rust type, instead of falling back to its base type
+- `col: domain_name` row annotation override, to read an ordinary result column as a mapped domain: PostgreSQL always reports such a column as the domain's base type, so `types.domains` alone cannot reach it there
 
 ## [1.0.1](https://github.com/cornucopia-rs/cornucopia/compare/cornucopia-v1.0.0...cornucopia-v1.0.1) - 2026-08-12
 
