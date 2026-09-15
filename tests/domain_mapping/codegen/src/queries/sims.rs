@@ -26,6 +26,23 @@ impl<'a> From<SelectSimsBorrowed<'a>> for SelectSims {
         }
     }
 }
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectSimIdAndIccid {
+    pub id: i32,
+    pub iccid: iccid_type::Iccid,
+}
+pub struct SelectSimIdAndIccidBorrowed {
+    pub id: i32,
+    pub iccid: iccid_type::Iccid,
+}
+impl From<SelectSimIdAndIccidBorrowed> for SelectSimIdAndIccid {
+    fn from(SelectSimIdAndIccidBorrowed { id, iccid }: SelectSimIdAndIccidBorrowed) -> Self {
+        Self {
+            id,
+            iccid: iccid.into(),
+        }
+    }
+}
 use crate::client::sync::GenericClient;
 use postgres::fallible_iterator::FallibleIterator;
 pub struct SelectSimsQuery<'c, 'a, 's, C: GenericClient, T, const N: usize> {
@@ -104,6 +121,65 @@ where
         mapper: fn(iccid_type::Iccid) -> R,
     ) -> IccidtypeIccidQuery<'c, 'a, 's, C, R, N> {
         IccidtypeIccidQuery {
+            client: self.client,
+            params: self.params,
+            query: self.query,
+            cached: self.cached,
+            extractor: self.extractor,
+            mapper,
+        }
+    }
+    pub fn one(self) -> Result<T, postgres::Error> {
+        let row = crate::client::sync::one(self.client, self.query, &self.params, self.cached)?;
+        Ok((self.mapper)((self.extractor)(&row)?))
+    }
+    pub fn all(self) -> Result<Vec<T>, postgres::Error> {
+        self.iter()?.collect()
+    }
+    pub fn opt(self) -> Result<Option<T>, postgres::Error> {
+        let opt_row = crate::client::sync::opt(self.client, self.query, &self.params, self.cached)?;
+        Ok(opt_row
+            .map(|row| {
+                let extracted = (self.extractor)(&row)?;
+                Ok((self.mapper)(extracted))
+            })
+            .transpose()?)
+    }
+    pub fn iter(
+        self,
+    ) -> Result<impl Iterator<Item = Result<T, postgres::Error>> + 'c, postgres::Error> {
+        let stream = crate::client::sync::raw(
+            self.client,
+            self.query,
+            crate::slice_iter(&self.params),
+            self.cached,
+        )?;
+        let mapped = stream.iterator().map(move |res| {
+            res.and_then(|row| {
+                let extracted = (self.extractor)(&row)?;
+                Ok((self.mapper)(extracted))
+            })
+        });
+        Ok(mapped)
+    }
+}
+pub struct SelectSimIdAndIccidQuery<'c, 'a, 's, C: GenericClient, T, const N: usize> {
+    client: &'c mut C,
+    params: [&'a (dyn postgres_types::ToSql + Sync); N],
+    query: &'static str,
+    cached: Option<&'s postgres::Statement>,
+    extractor: fn(&postgres::Row) -> Result<SelectSimIdAndIccidBorrowed, postgres::Error>,
+    mapper: fn(SelectSimIdAndIccidBorrowed) -> T,
+}
+impl<'c, 'a, 's, C, T: 'c, const N: usize> SelectSimIdAndIccidQuery<'c, 'a, 's, C, T, N>
+where
+    C: GenericClient,
+{
+    pub fn map<R>(
+        self,
+        mapper: fn(SelectSimIdAndIccidBorrowed) -> R,
+    ) -> SelectSimIdAndIccidQuery<'c, 'a, 's, C, R, N> {
+        SelectSimIdAndIccidQuery {
             client: self.client,
             params: self.params,
             query: self.query,
@@ -244,6 +320,38 @@ impl SelectSimIccidStmt {
             cached: self.1.as_ref(),
             extractor: |row| Ok(row.try_get::<_, crate::types::IccidRowValue>(0)?.0),
             mapper: |it| it.into(),
+        }
+    }
+}
+pub struct SelectSimIdAndIccidStmt(&'static str, Option<postgres::Statement>);
+pub fn select_sim_id_and_iccid() -> SelectSimIdAndIccidStmt {
+    SelectSimIdAndIccidStmt("SELECT id, iccid FROM sims", None)
+}
+impl SelectSimIdAndIccidStmt {
+    pub fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a mut C,
+    ) -> Result<Self, postgres::Error> {
+        self.1 = Some(client.prepare(self.0)?);
+        Ok(self)
+    }
+    pub fn bind<'c, 'a, 's, C: GenericClient>(
+        &'s self,
+        client: &'c mut C,
+    ) -> SelectSimIdAndIccidQuery<'c, 'a, 's, C, SelectSimIdAndIccid, 0> {
+        SelectSimIdAndIccidQuery {
+            client,
+            params: [],
+            query: self.0,
+            cached: self.1.as_ref(),
+            extractor:
+                |row: &postgres::Row| -> Result<SelectSimIdAndIccidBorrowed, postgres::Error> {
+                    Ok(SelectSimIdAndIccidBorrowed {
+                        id: row.try_get(0)?,
+                        iccid: row.try_get::<_, crate::types::IccidRowValue>(1)?.0,
+                    })
+                },
+            mapper: |it| SelectSimIdAndIccid::from(it),
         }
     }
 }

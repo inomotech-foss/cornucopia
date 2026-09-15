@@ -1,5 +1,7 @@
 use codegen::{
-    queries::sims::{InsertSimParams, insert_sim, select_sim_iccid, select_sims},
+    queries::sims::{
+        InsertSimParams, insert_sim, select_sim_iccid, select_sim_id_and_iccid, select_sims,
+    },
     types::SimInfoBorrowed,
 };
 use iccid_type::Iccid;
@@ -17,6 +19,7 @@ pub fn main() {
 
     test_mapped_and_unmapped_domains(client);
     test_row_override(client);
+    test_row_override_with_copy_field(client);
 }
 
 // A mapped domain (`iccid`) is used by its configured Rust type, both as a parameter and,
@@ -50,4 +53,13 @@ pub fn test_mapped_and_unmapped_domains(client: &mut Client) {
 pub fn test_row_override(client: &mut Client) {
     let iccids = select_sim_iccid().bind(client).all().unwrap();
     assert_eq!(iccids, vec![Iccid("1234567890123456789".to_string())]);
+}
+
+// A named (multi-field) row whose only non-`Copy` field is a mapped domain: this only compiles
+// if the generated `SelectSimIdAndIccidBorrowed` doesn't declare an unused lifetime parameter.
+pub fn test_row_override_with_copy_field(client: &mut Client) {
+    let rows = select_sim_id_and_iccid().bind(client).all().unwrap();
+    let row = &rows[0];
+    assert_eq!(row.id, 1);
+    assert_eq!(row.iccid, Iccid("1234567890123456789".to_string()));
 }

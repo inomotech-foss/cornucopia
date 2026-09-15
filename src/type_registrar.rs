@@ -283,6 +283,50 @@ impl CornucopiaType {
         }
     }
 
+    /// Whether `brw_ty(_, true, _)` actually uses the lifetime it is given, i.e. whether this
+    /// type is genuinely borrowed rather than owned. A mapped type with no `borrowed-type` (a
+    /// mapped domain, notably) is owned even when it isn't `Copy`, so `is_copy` alone cannot
+    /// answer this: it would make a row or composite that is only non-`Copy` because of such a
+    /// field declare a lifetime parameter no field uses, which is a hard compile error on the
+    /// generated struct (E0392), not just a lint.
+    pub(crate) fn brw_uses_lifetime(&self) -> bool {
+        match self {
+            CornucopiaType::Simple {
+                pg_ty,
+                rust_name,
+                borrowed_name,
+                ..
+            } => {
+                if let Some(borrowed) = borrowed_name {
+                    return borrowed.contains('\'');
+                }
+                match *pg_ty {
+                    Type::BYTEA
+                    | Type::TEXT
+                    | Type::VARCHAR
+                    | Type::BPCHAR
+                    | Type::NAME
+                    | Type::JSON
+                    | Type::JSONB => true,
+                    ref ty
+                        if (ty.name() == "citext"
+                            || ty.name() == "ltree"
+                            || ty.name() == "lquery"
+                            || ty.name() == "ltxtquery") =>
+                    {
+                        true
+                    }
+                    _ => matches!(rust_name.as_str(), "String" | "Vec<u8>"),
+                }
+            }
+            // An array is always rendered as `ArrayIterator<'a, _>` or `ArrayIterator<'_, _>`;
+            // when it contributes the struct's lifetime, it is genuinely used.
+            CornucopiaType::Array { .. } => true,
+            CornucopiaType::Domain { inner, .. } => inner.brw_uses_lifetime(),
+            CornucopiaType::Custom { is_copy, .. } => !is_copy,
+        }
+    }
+
     /// String representing a borrowed rust equivalent of this type. Notably, if
     /// a Rust equivalent is a String or a Vec<T>, it will return a &str and a &[T] respectively.
     pub(crate) fn brw_ty(
@@ -815,5 +859,47 @@ mod tests {
     fn domain_row_wrapper_name_upper_camel_cases_the_domain() {
         assert_eq!(domain_row_wrapper_name("iccid"), "IccidRowValue");
         assert_eq!(domain_row_wrapper_name("sim_note"), "SimNoteRowValue");
+    }
+
+    /// A mapped domain (or any `types.mapping` entry with no `borrowed-type`) is not `Copy`,
+    /// but it is also not borrowed: a row or composite whose only non-`Copy` field is one of
+    /// these must not declare an unused lifetime parameter (a hard compile error, not a lint).
+    #[test]
+    fn mapped_type_without_borrowed_form_does_not_need_a_lifetime() {
+        let mapped = CornucopiaType::Simple {
+            pg_ty: Type::new(
+                "iccid".to_string(),
+                100_003,
+                Kind::Domain(Type::TEXT),
+                "public".to_string(),
+            ),
+            rust_name: "vibe_sim::Iccid".to_string(),
+            borrowed_name: None,
+            is_copy: false,
+        };
+        assert!(!mapped.is_copy());
+        assert!(!mapped.brw_uses_lifetime());
+    }
+
+    #[test]
+    fn base_text_type_needs_a_lifetime() {
+        let text = CornucopiaType::Simple {
+            pg_ty: Type::TEXT,
+            rust_name: "String".to_string(),
+            borrowed_name: None,
+            is_copy: false,
+        };
+        assert!(text.brw_uses_lifetime());
+    }
+
+    #[test]
+    fn explicit_borrowed_type_with_a_lifetime_needs_one() {
+        let mapped = CornucopiaType::Simple {
+            pg_ty: Type::VARCHAR,
+            rust_name: "db_types::CustomString".to_string(),
+            borrowed_name: Some("db_types::CustomStringRef<'a>".to_string()),
+            is_copy: false,
+        };
+        assert!(mapped.brw_uses_lifetime());
     }
 }

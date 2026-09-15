@@ -133,6 +133,16 @@ fn gen_row_structs(row: &PreparedItem, ctx: &GenCtx, config: &Config) -> proc_ma
 
         let borrowed_name = format_ident!("{}Borrowed", name.to_string());
 
+        // Not `Copy` doesn't imply borrowed: a mapped domain (or any mapped type with no
+        // `borrowed-type`) is owned even though it isn't `Copy`. Declaring `<'a>` regardless
+        // would be a hard error (E0392) whenever no field actually uses it.
+        let needs_lifetime = fields.iter().any(|f| f.ty.brw_uses_lifetime());
+        let lifetime_param = if needs_lifetime {
+            quote!(<'a>)
+        } else {
+            quote!()
+        };
+
         let borrowed_fields_ty: Vec<_> = fields
             .iter()
             .map(|p| syn::parse_str::<syn::Type>(&p.brw_ty(true, ctx)).unwrap())
@@ -168,15 +178,15 @@ fn gen_row_structs(row: &PreparedItem, ctx: &GenCtx, config: &Config) -> proc_ma
 
         quote! {
             #(#[#custom_attrs_borrowed])*
-            pub struct #borrowed_name<'a> {
+            pub struct #borrowed_name #lifetime_param {
                 #(#borrowed_fields_with_attrs,)*
             }
 
-            impl<'a> From<#borrowed_name<'a>> for #name_ident {
+            impl #lifetime_param From<#borrowed_name #lifetime_param> for #name_ident {
                 fn from(
                     #borrowed_name {
                         #(#fields_name,)*
-                    }: #borrowed_name<'a>
+                    }: #borrowed_name #lifetime_param
                 ) -> Self {
                     Self {
                         #(#field_assignments,)*

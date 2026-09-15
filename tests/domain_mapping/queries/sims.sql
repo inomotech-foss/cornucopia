@@ -8,3 +8,9 @@ SELECT iccid, note, info FROM sims;
 -- `iccid` domain: this override is the only way to get the mapped type back for it.
 --! select_sim_iccid: (iccid: iccid)
 SELECT iccid FROM sims;
+
+-- A named (multi-field) row whose only non-Copy field is a mapped domain: `id` is Copy, and
+-- the mapped `iccid` field is owned (not borrowed), so the borrowed row must not declare a
+-- lifetime parameter that no field uses.
+--! select_sim_id_and_iccid: (iccid: iccid)
+SELECT id, iccid FROM sims;
