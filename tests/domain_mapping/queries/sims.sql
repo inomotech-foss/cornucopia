@@ -14,3 +14,17 @@ SELECT iccid FROM sims;
 -- lifetime parameter that no field uses.
 --! select_sim_id_and_iccid: (iccid: iccid)
 SELECT id, iccid FROM sims;
+
+-- A named (multi-field) params struct whose only non-Copy field is a mapped domain: `:iccid`
+-- is assigned to a column (so PostgreSQL reports it as the domain), `:id` is Copy, and the
+-- mapped `iccid` field is owned, so the params struct must not declare an unused lifetime.
+--! update_sim_iccid
+UPDATE sims SET iccid = :iccid WHERE id = :id;
+
+-- A composite (not just a row/params struct) whose only non-Copy field is a mapped domain:
+-- `sim_ref`'s Borrowed/Params representation must not declare an unused lifetime either.
+--! insert_sim_ref
+INSERT INTO sim_refs (value) VALUES (:value);
+
+--! select_sim_ref: (value)
+SELECT value FROM sim_refs;

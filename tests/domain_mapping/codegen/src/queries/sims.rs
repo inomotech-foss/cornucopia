@@ -6,6 +6,11 @@ pub struct InsertSimParams<'a, T1: crate::StringSql> {
     pub note: T1,
     pub info: crate::types::SimInfoBorrowed<'a>,
 }
+#[derive(Debug)]
+pub struct UpdateSimIccidParams {
+    pub iccid: iccid_type::Iccid,
+    pub id: i32,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectSims {
     pub iccid: String,
@@ -222,6 +227,65 @@ where
         Ok(mapped)
     }
 }
+pub struct SimRefQuery<'c, 'a, 's, C: GenericClient, T, const N: usize> {
+    client: &'c mut C,
+    params: [&'a (dyn postgres_types::ToSql + Sync); N],
+    query: &'static str,
+    cached: Option<&'s postgres::Statement>,
+    extractor: fn(&postgres::Row) -> Result<crate::types::SimRefBorrowed, postgres::Error>,
+    mapper: fn(crate::types::SimRefBorrowed) -> T,
+}
+impl<'c, 'a, 's, C, T: 'c, const N: usize> SimRefQuery<'c, 'a, 's, C, T, N>
+where
+    C: GenericClient,
+{
+    pub fn map<R>(
+        self,
+        mapper: fn(crate::types::SimRefBorrowed) -> R,
+    ) -> SimRefQuery<'c, 'a, 's, C, R, N> {
+        SimRefQuery {
+            client: self.client,
+            params: self.params,
+            query: self.query,
+            cached: self.cached,
+            extractor: self.extractor,
+            mapper,
+        }
+    }
+    pub fn one(self) -> Result<T, postgres::Error> {
+        let row = crate::client::sync::one(self.client, self.query, &self.params, self.cached)?;
+        Ok((self.mapper)((self.extractor)(&row)?))
+    }
+    pub fn all(self) -> Result<Vec<T>, postgres::Error> {
+        self.iter()?.collect()
+    }
+    pub fn opt(self) -> Result<Option<T>, postgres::Error> {
+        let opt_row = crate::client::sync::opt(self.client, self.query, &self.params, self.cached)?;
+        Ok(opt_row
+            .map(|row| {
+                let extracted = (self.extractor)(&row)?;
+                Ok((self.mapper)(extracted))
+            })
+            .transpose()?)
+    }
+    pub fn iter(
+        self,
+    ) -> Result<impl Iterator<Item = Result<T, postgres::Error>> + 'c, postgres::Error> {
+        let stream = crate::client::sync::raw(
+            self.client,
+            self.query,
+            crate::slice_iter(&self.params),
+            self.cached,
+        )?;
+        let mapped = stream.iterator().map(move |res| {
+            res.and_then(|row| {
+                let extracted = (self.extractor)(&row)?;
+                Ok((self.mapper)(extracted))
+            })
+        });
+        Ok(mapped)
+    }
+}
 pub struct InsertSimStmt(&'static str, Option<postgres::Statement>);
 pub fn insert_sim() -> InsertSimStmt {
     InsertSimStmt(
@@ -352,6 +416,85 @@ impl SelectSimIdAndIccidStmt {
                     })
                 },
             mapper: |it| SelectSimIdAndIccid::from(it),
+        }
+    }
+}
+pub struct UpdateSimIccidStmt(&'static str, Option<postgres::Statement>);
+pub fn update_sim_iccid() -> UpdateSimIccidStmt {
+    UpdateSimIccidStmt("UPDATE sims SET iccid = $1 WHERE id = $2", None)
+}
+impl UpdateSimIccidStmt {
+    pub fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a mut C,
+    ) -> Result<Self, postgres::Error> {
+        self.1 = Some(client.prepare(self.0)?);
+        Ok(self)
+    }
+    pub fn bind<'c, 'a, 's, C: GenericClient>(
+        &'s self,
+        client: &'c mut C,
+        iccid: &'a iccid_type::Iccid,
+        id: &'a i32,
+    ) -> Result<u64, postgres::Error> {
+        client.execute(self.0, &[iccid, id])
+    }
+}
+impl<'c, 'a, 's, C: GenericClient>
+    crate::client::sync::Params<'c, 'a, 's, UpdateSimIccidParams, Result<u64, postgres::Error>, C>
+    for UpdateSimIccidStmt
+{
+    fn params(
+        &'s self,
+        client: &'c mut C,
+        params: &'a UpdateSimIccidParams,
+    ) -> Result<u64, postgres::Error> {
+        self.bind(client, &params.iccid, &params.id)
+    }
+}
+pub struct InsertSimRefStmt(&'static str, Option<postgres::Statement>);
+pub fn insert_sim_ref() -> InsertSimRefStmt {
+    InsertSimRefStmt("INSERT INTO sim_refs (value) VALUES ($1)", None)
+}
+impl InsertSimRefStmt {
+    pub fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a mut C,
+    ) -> Result<Self, postgres::Error> {
+        self.1 = Some(client.prepare(self.0)?);
+        Ok(self)
+    }
+    pub fn bind<'c, 'a, 's, C: GenericClient>(
+        &'s self,
+        client: &'c mut C,
+        value: &'a crate::types::SimRefBorrowed,
+    ) -> Result<u64, postgres::Error> {
+        client.execute(self.0, &[value])
+    }
+}
+pub struct SelectSimRefStmt(&'static str, Option<postgres::Statement>);
+pub fn select_sim_ref() -> SelectSimRefStmt {
+    SelectSimRefStmt("SELECT value FROM sim_refs", None)
+}
+impl SelectSimRefStmt {
+    pub fn prepare<'a, C: GenericClient>(
+        mut self,
+        client: &'a mut C,
+    ) -> Result<Self, postgres::Error> {
+        self.1 = Some(client.prepare(self.0)?);
+        Ok(self)
+    }
+    pub fn bind<'c, 'a, 's, C: GenericClient>(
+        &'s self,
+        client: &'c mut C,
+    ) -> SimRefQuery<'c, 'a, 's, C, crate::types::SimRef, 0> {
+        SimRefQuery {
+            client,
+            params: [],
+            query: self.0,
+            cached: self.1.as_ref(),
+            extractor: |row| Ok(row.try_get(0)?),
+            mapper: |it| it.into(),
         }
     }
 }

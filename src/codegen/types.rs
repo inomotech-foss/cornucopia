@@ -286,6 +286,16 @@ fn gen_custom_type(
                     #tosql_impl
                 }
             } else {
+                // A composite whose non-`Copy` fields are all owned mapped types (a mapped
+                // domain, notably) has no field that actually borrows anything: declaring
+                // `<'a>` regardless would be a hard error (E0392) on the generated struct.
+                let needs_lifetime = fields.iter().any(|f| f.ty.brw_uses_lifetime());
+                let lifetime_param = if needs_lifetime {
+                    quote!(<'a>)
+                } else {
+                    quote!()
+                };
+
                 let fields_brw: Vec<_> = fields
                     .iter()
                     .map(|p| syn::parse_str::<syn::Type>(&p.brw_ty(true, ctx)).unwrap())
@@ -321,15 +331,15 @@ fn gen_custom_type(
 
                 let borrowed_struct = quote! {
                     #[derive(Debug)]
-                    pub struct #struct_name_borrowed_ident<'a> {
+                    pub struct #struct_name_borrowed_ident #lifetime_param {
                         #(#borrowed_fields_with_attrs,)*
                     }
 
-                    impl<'a> From<#struct_name_borrowed_ident<'a>> for #struct_name_ident {
+                    impl #lifetime_param From<#struct_name_borrowed_ident #lifetime_param> for #struct_name_ident {
                         fn from(
                             #struct_name_borrowed_ident {
                                 #(#fields_name,)*
-                            }: #struct_name_borrowed_ident<'a>,
+                            }: #struct_name_borrowed_ident #lifetime_param,
                         ) -> Self {
                             Self {
                                 #(#field_assignments,)*
@@ -380,7 +390,7 @@ fn gen_custom_type(
 
                     quote! {
                         #[derive(Debug #derive)]
-                        pub struct #struct_name_params_ident<'a> {
+                        pub struct #struct_name_params_ident #lifetime_param {
                             #(#params_fields_with_attrs,)*
                         }
                     }
@@ -515,18 +525,18 @@ fn struct_tosql(
     is_params: bool,
     ctx: &GenCtx,
 ) -> proc_macro2::TokenStream {
-    let (post, lifetime) = if is_borrow {
-        if is_params {
-            ("Borrowed", "<'a>")
-        } else {
-            ("Params", "<'a>")
-        }
+    let post = if is_borrow {
+        if is_params { "Borrowed" } else { "Params" }
     } else {
-        ("", "")
+        ""
     };
 
+    // Matches the lifetime decision made where `#struct_name_with_post` is defined
+    // (`gen_custom_type`): a field only needs the struct's own lifetime if it is genuinely
+    // borrowed, which an owned mapped type (a mapped domain, notably) is not, regardless of
+    // `Copy`-ness.
     let struct_name_with_post = format_ident!("{}{}", struct_name, post);
-    let lifetime_tokens = if !lifetime.is_empty() {
+    let lifetime_tokens = if is_borrow && fields.iter().any(|f| f.ty.brw_uses_lifetime()) {
         quote!(<'a>)
     } else {
         quote!()
@@ -654,10 +664,20 @@ fn composite_fromsql(
         .map(|p| format_ident!("{}", p.ident.rs))
         .collect();
 
+    // Matches the lifetime decision made where `#struct_name_borrowed` is defined
+    // (`gen_custom_type`). The `impl<'a> FromSql<'a>` and `out: &'a [u8]` above always need
+    // `'a` regardless (that's the trait's own lifetime, for the raw bytes); only the target
+    // type's own generic argument depends on whether any field actually borrows.
+    let lifetime_param = if fields.iter().any(|f| f.ty.brw_uses_lifetime()) {
+        quote!(<'a>)
+    } else {
+        quote!()
+    };
+
     quote! {
-        impl<'a> postgres_types::FromSql<'a> for #struct_name_borrowed<'a> {
+        impl<'a> postgres_types::FromSql<'a> for #struct_name_borrowed #lifetime_param {
             fn from_sql(ty: &postgres_types::Type, out: &'a [u8]) ->
-                Result<#struct_name_borrowed<'a>, Box<dyn std::error::Error + Sync + Send>>
+                Result<#struct_name_borrowed #lifetime_param, Box<dyn std::error::Error + Sync + Send>>
             {
                 let fields = match *ty.kind() {
                     postgres_types::Kind::Composite(ref fields) => fields,

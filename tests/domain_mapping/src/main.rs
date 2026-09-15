@@ -1,8 +1,10 @@
 use codegen::{
     queries::sims::{
-        InsertSimParams, insert_sim, select_sim_iccid, select_sim_id_and_iccid, select_sims,
+        InsertSimParams, insert_sim, insert_sim_ref, select_sim_iccid, select_sim_id_and_iccid,
+        select_sim_ref, select_sims, update_sim_iccid,
     },
     types::SimInfoBorrowed,
+    types::SimRefBorrowed,
 };
 use iccid_type::Iccid;
 use postgres::{Client, Config, NoTls};
@@ -20,6 +22,8 @@ pub fn main() {
     test_mapped_and_unmapped_domains(client);
     test_row_override(client);
     test_row_override_with_copy_field(client);
+    test_params_with_copy_field(client);
+    test_composite_with_only_copy_and_mapped_fields(client);
 }
 
 // A mapped domain (`iccid`) is used by its configured Rust type, both as a parameter and,
@@ -62,4 +66,30 @@ pub fn test_row_override_with_copy_field(client: &mut Client) {
     let row = &rows[0];
     assert_eq!(row.id, 1);
     assert_eq!(row.iccid, Iccid("1234567890123456789".to_string()));
+}
+
+// A named (multi-field) params struct whose only non-`Copy` field is a mapped domain: this only
+// compiles if the generated `UpdateSimIccidParams` doesn't declare an unused lifetime parameter.
+pub fn test_params_with_copy_field(client: &mut Client) {
+    update_sim_iccid()
+        .bind(client, &Iccid("1111111111111111111".to_string()), &1)
+        .unwrap();
+
+    let rows = select_sim_id_and_iccid().bind(client).all().unwrap();
+    assert_eq!(rows[0].iccid, Iccid("1111111111111111111".to_string()));
+}
+
+// A composite whose fields are only Copy and a mapped domain: this only compiles if the
+// generated `SimRefBorrowed` doesn't declare an unused lifetime parameter either.
+pub fn test_composite_with_only_copy_and_mapped_fields(client: &mut Client) {
+    let value = SimRefBorrowed {
+        id: 42,
+        iccid: Iccid("2222222222222222222".to_string()),
+    };
+    insert_sim_ref().bind(client, &value).unwrap();
+
+    let rows = select_sim_ref().bind(client).all().unwrap();
+    let row = &rows[0];
+    assert_eq!(row.id, 42);
+    assert_eq!(row.iccid, Iccid("2222222222222222222".to_string()));
 }

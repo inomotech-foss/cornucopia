@@ -18,3 +18,16 @@ CREATE TABLE sims (
     note sim_note,
     info sim_info
 );
+
+-- A composite with no borrowed field at all: `id` is Copy, and `iccid` (nested, so it keeps
+-- its true domain type - see above) is a mapped owned type. Its Borrowed/Params structs must
+-- not declare a lifetime parameter that no field uses either.
+CREATE TYPE sim_ref AS (
+    id integer,
+    iccid iccid
+);
+
+CREATE TABLE sim_refs (
+    id serial PRIMARY KEY,
+    value sim_ref
+);

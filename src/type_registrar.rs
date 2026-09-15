@@ -36,6 +36,11 @@ pub(crate) enum CornucopiaType {
         struct_name: String,
         is_copy: bool,
         is_params: bool,
+        /// Whether this composite's own `Borrowed`/`Params` struct declares a lifetime, i.e.
+        /// whether any of its fields is genuinely borrowed. A reference to it elsewhere (as a
+        /// field, or in params position) must match: writing `{struct}Borrowed<'a>` when the
+        /// struct itself has no `<'a>` is a compile error (E0107), not just an unused one.
+        needs_lifetime: bool,
     },
 }
 
@@ -66,11 +71,22 @@ impl CornucopiaType {
                 borrowed_name: Some(_),
                 ..
             } => true,
-            CornucopiaType::Simple { .. } => !self.is_copy(),
+            // A mapped type with no `borrowed-type` (a mapped domain, notably) renders as
+            // itself in `param_ty`/`brw_ty` regardless of `is_copy`: it needs a lifetime only
+            // if it is actually `&str`/`&[u8]` under the hood (see `brw_ty`'s same fallback).
+            // `!self.is_copy()` here would make a params struct whose only non-`Copy` fields
+            // are such owned mapped types declare an unused lifetime (E0392).
+            CornucopiaType::Simple { rust_name, .. } => {
+                matches!(rust_name.as_str(), "String" | "Vec<u8>")
+            }
             CornucopiaType::Domain { inner, .. } | CornucopiaType::Array { inner } => {
                 inner.is_ref()
             }
-            _ => !self.is_copy(),
+            CornucopiaType::Custom {
+                is_copy,
+                needs_lifetime,
+                ..
+            } => !is_copy && *needs_lifetime,
         }
     }
 
@@ -269,13 +285,17 @@ impl CornucopiaType {
             CornucopiaType::Custom {
                 is_params,
                 is_copy,
+                needs_lifetime,
                 pg_ty,
                 struct_name,
-                ..
             } => {
                 if !is_copy && !is_params {
                     let path = ctx.custom_ty_path(pg_ty.schema(), struct_name);
-                    format!("{path}Params<'a>")
+                    if *needs_lifetime {
+                        format!("{path}Params<'a>")
+                    } else {
+                        format!("{path}Params")
+                    }
                 } else {
                     self.brw_ty(is_inner_nullable, true, ctx)
                 }
@@ -323,7 +343,11 @@ impl CornucopiaType {
             // when it contributes the struct's lifetime, it is genuinely used.
             CornucopiaType::Array { .. } => true,
             CornucopiaType::Domain { inner, .. } => inner.brw_uses_lifetime(),
-            CornucopiaType::Custom { is_copy, .. } => !is_copy,
+            CornucopiaType::Custom {
+                is_copy,
+                needs_lifetime,
+                ..
+            } => !is_copy && *needs_lifetime,
         }
     }
 
@@ -385,6 +409,7 @@ impl CornucopiaType {
             CornucopiaType::Domain { inner, .. } => inner.brw_ty(false, has_lifetime, ctx),
             CornucopiaType::Custom {
                 is_copy,
+                needs_lifetime,
                 pg_ty,
                 struct_name,
                 ..
@@ -392,8 +417,10 @@ impl CornucopiaType {
                 let path = ctx.custom_ty_path(pg_ty.schema(), struct_name);
                 if *is_copy {
                     path
-                } else {
+                } else if *needs_lifetime {
                     format!("{path}Borrowed<{lifetime}>")
+                } else {
+                    format!("{path}Borrowed")
                 }
             }
         }
@@ -457,13 +484,19 @@ impl TypeRegistrar {
         default_is_copy: bool,
         default_is_params: bool,
     ) -> Result<&Rc<CornucopiaType>, Error> {
-        fn custom(ty: &Type, is_copy: bool, is_params: bool) -> CornucopiaType {
+        fn custom(
+            ty: &Type,
+            is_copy: bool,
+            is_params: bool,
+            needs_lifetime: bool,
+        ) -> CornucopiaType {
             let rust_ty_name = ty.name().to_upper_camel_case();
             CornucopiaType::Custom {
                 pg_ty: ty.clone(),
                 struct_name: rust_ty_name,
                 is_copy,
                 is_params,
+                needs_lifetime,
             }
         }
 
@@ -475,7 +508,7 @@ impl TypeRegistrar {
         }
 
         Ok(match ty.kind() {
-            Kind::Enum(_) => self.insert(ty, || custom(ty, true, true)),
+            Kind::Enum(_) => self.insert(ty, || custom(ty, true, true, false)),
             Kind::Array(inner_ty) => {
                 let inner = self
                     .register(name, inner_ty, query_name, module_info)?
@@ -493,12 +526,14 @@ impl TypeRegistrar {
             Kind::Composite(composite_fields) => {
                 let mut is_copy = default_is_copy;
                 let mut is_params = default_is_params;
+                let mut needs_lifetime = false;
                 for field in composite_fields {
                     let field_ty = self.register(name, field.type_(), query_name, module_info)?;
                     is_copy &= field_ty.is_copy();
                     is_params &= field_ty.is_params();
+                    needs_lifetime |= field_ty.brw_uses_lifetime();
                 }
-                self.insert(ty, || custom(ty, is_copy, is_params))
+                self.insert(ty, || custom(ty, is_copy, is_params, needs_lifetime))
             }
             Kind::Simple => {
                 let (rust_name, is_copy) = match *ty {
@@ -901,5 +936,72 @@ mod tests {
             is_copy: false,
         };
         assert!(mapped.brw_uses_lifetime());
+    }
+
+    /// Params-position params structs use `is_ref`, not `brw_uses_lifetime` directly, but the
+    /// two must agree for a mapped type: `param_ergo_ty`'s fallback for it is `param_ty`, which
+    /// renders identically to `brw_ty` for this shape.
+    #[test]
+    fn mapped_type_is_ref_agrees_with_brw_uses_lifetime() {
+        let mapped = CornucopiaType::Simple {
+            pg_ty: Type::new(
+                "iccid".to_string(),
+                100_004,
+                Kind::Domain(Type::TEXT),
+                "public".to_string(),
+            ),
+            rust_name: "vibe_sim::Iccid".to_string(),
+            borrowed_name: None,
+            is_copy: false,
+        };
+        assert!(!mapped.is_ref());
+    }
+
+    /// A composite whose own `Borrowed`/`Params` struct has no lifetime (e.g. its only
+    /// non-`Copy` field is a mapped domain) must not be referenced elsewhere as
+    /// `{struct}Borrowed<'a>`/`{struct}Params<'a>` either: that would be a different compile
+    /// error (E0107, wrong number of generic arguments), not just an unused one.
+    #[test]
+    fn custom_type_without_lifetime_renders_without_generic_argument() {
+        let ctx = GenCtx::new(ModCtx::Queries, true);
+        let sim_ref = CornucopiaType::Custom {
+            pg_ty: Type::new(
+                "sim_ref".to_string(),
+                100_005,
+                Kind::Pseudo,
+                "public".to_string(),
+            ),
+            struct_name: "SimRef".to_string(),
+            is_copy: false,
+            is_params: true,
+            needs_lifetime: false,
+        };
+        assert!(!sim_ref.is_ref());
+        assert_eq!(
+            sim_ref.brw_ty(false, true, &ctx),
+            "crate::types::SimRefBorrowed"
+        );
+    }
+
+    #[test]
+    fn custom_type_with_lifetime_renders_with_generic_argument() {
+        let ctx = GenCtx::new(ModCtx::Queries, true);
+        let named_composite = CornucopiaType::Custom {
+            pg_ty: Type::new(
+                "named_composite".to_string(),
+                100_006,
+                Kind::Pseudo,
+                "public".to_string(),
+            ),
+            struct_name: "NamedComposite".to_string(),
+            is_copy: false,
+            is_params: true,
+            needs_lifetime: true,
+        };
+        assert!(named_composite.is_ref());
+        assert_eq!(
+            named_composite.brw_ty(false, true, &ctx),
+            "crate::types::NamedCompositeBorrowed<'a>"
+        );
     }
 }
