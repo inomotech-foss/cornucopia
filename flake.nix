@@ -23,7 +23,7 @@
           pname = "cornucopia";
           inherit (manifest.package) version;
           src = self;
-          cargoHash = "sha256-woQlvtGqVsa/Cutld5KpJ5RCiqpnwjDm2zvsfo1FZe4=";
+          cargoHash = "sha256-w30rfXWotP+kge08GFh2SbTUuMI4TuD8O7MDF9DzGM4=";
 
           # The test suite starts PostgreSQL in Docker, which is unavailable
           # in the Nix build sandbox.
